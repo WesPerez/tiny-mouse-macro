@@ -267,6 +267,12 @@ public sealed class HotkeyService : IDisposable
             if (_vmwareForeground) RequestVmwareReconnect();
             else _vmwareRecoveryTimer.Stop();
         }
+        if (_vmwareForeground && NativeMethods.GetClipCursor(out var clip) && NativeMethods.GetWindowRect(foreground, out var bounds))
+        {
+            var clipped = clip.Left >= bounds.Left && clip.Top >= bounds.Top &&
+                clip.Right <= bounds.Right && clip.Bottom <= bounds.Bottom;
+            if (_vmwareReconnect.ObserveCapture(clipped)) RequestVmwareReconnect();
+        }
         // No recurring hook reinstalls: only bounded VMware focus/click transitions.
         // A quiet period clears stale main-key latches after missed key-up / desktop changes.
         if (Environment.TickCount64 - _lastKeyboardActivity < 1500) return;
@@ -316,9 +322,7 @@ public sealed class HotkeyService : IDisposable
         try
         {
             using var process = System.Diagnostics.Process.GetProcessById(id);
-            return process.ProcessName.Equals("vmware", StringComparison.OrdinalIgnoreCase) ||
-                process.ProcessName.Equals("vmware-vmx", StringComparison.OrdinalIgnoreCase) ||
-                process.ProcessName.Equals("mksSandbox", StringComparison.OrdinalIgnoreCase);
+            return DesktopSwitcher.IsVmwareProcess(process.ProcessName);
         }
         catch (ArgumentException) { return false; }
         catch (InvalidOperationException) { return false; }
@@ -353,16 +357,24 @@ internal readonly record struct KeyChord(int Key, uint Modifiers)
     public override string ToString() => HotkeyParser.Normalize(Modifiers, (uint)Key);
 }
 
-// Entry plus one subsequent grab click per foreground visit. Never an endless hook race.
+// Two attempts per foreground visit or observed new capture, not per arbitrary click.
 internal sealed class VmwareReconnectBudget
 {
     private nint _window;
     private int _remaining;
     private bool _pending;
+    private bool _captured;
     public void ObserveForeground(nint window)
     {
         if (_window == window) return;
-        _window = window; _remaining = window == 0 ? 0 : 2; _pending = false;
+        _window = window; _remaining = window == 0 ? 0 : 2; _pending = false; _captured = false;
+    }
+    public bool ObserveCapture(bool captured)
+    {
+        var entered = _window != 0 && captured && !_captured;
+        _captured = captured;
+        if (entered) _remaining = 2;
+        return entered;
     }
     public bool Request()
     {

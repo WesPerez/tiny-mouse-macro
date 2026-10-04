@@ -42,6 +42,53 @@ internal static class SelfTest
             Check("new VMware visit resets rehook budget", reconnect.Request());
             reconnect.ObserveForeground(0);
             Check("leaving VMware cancels pending rehook", !reconnect.Consume() && !reconnect.Request());
+            reconnect.ObserveForeground(123);
+            reconnect.Request(); reconnect.Consume(); reconnect.Request(); reconnect.Consume();
+            Check("new capture restores exhausted budget", reconnect.ObserveCapture(true) && reconnect.Request() && reconnect.Consume());
+            reconnect.Request(); reconnect.Consume();
+            Check("continuous capture cannot reset budget", !reconnect.ObserveCapture(true) && !reconnect.Request());
+            reconnect.ObserveCapture(false);
+            Check("same window recapture can recover", reconnect.ObserveCapture(true) && reconnect.Request());
+
+            var switchProfile = new MacroProfile { Steps = [new() { Type = MacroStepType.LeftClick, X = 1500, Y = 300 }] };
+            var vmBounds = new Rectangle(0, 0, 1000, 800);
+            Check("VMware cross-window compatibility only", DesktopSwitcher.CanAssistVmware(switchProfile, true, vmBounds) && !DesktopSwitcher.CanAssistVmware(switchProfile, false, vmBounds));
+            switchProfile.Steps[0].X = 400;
+            Check("guest internal click unchanged", !DesktopSwitcher.CanAssistVmware(switchProfile, true, vmBounds));
+            switchProfile.Steps[0].X = 1500; switchProfile.Steps[0].RecordedDelayMs = 10;
+            Check("recorded step excluded from automatic switching", !DesktopSwitcher.CanAssistVmware(switchProfile, true, vmBounds));
+            var targetPoint = new Point(1500, 300); var moves = 0; var reads = 0;
+            PointerPlacement.MoveUntilStableAsync(targetPoint, () => { moves++; return true; },
+                () => { reads++; return moves < 2 ? new Point(999, 300) : targetPoint; },
+                () => true, (_, _) => Task.CompletedTask, CancellationToken.None).GetAwaiter().GetResult();
+            Check("first move clipped then second move stable", moves == 2 && reads == 3);
+            moves = 0; reads = 0;
+            PointerPlacement.MoveUntilStableAsync(targetPoint, () => { moves++; return true; },
+                () => { reads++; return reads == 2 ? new Point(999, 300) : targetPoint; },
+                () => true, (_, _) => Task.CompletedTask, CancellationToken.None).GetAwaiter().GetResult();
+            Check("temporary arrival must remain stable", moves == 2 && reads == 4);
+            moves = 0; var blocked = false;
+            try { PointerPlacement.MoveUntilStableAsync(targetPoint, () => { moves++; return true; }, () => new Point(999, 300),
+                () => true, (_, _) => Task.CompletedTask, CancellationToken.None).GetAwaiter().GetResult(); }
+            catch (InvalidOperationException) { blocked = true; }
+            Check("permanent clipping aborts within six moves", blocked && moves == 6);
+            moves = 0; blocked = false;
+            try { PointerPlacement.MoveUntilStableAsync(targetPoint, () => { moves++; return true; }, () => targetPoint,
+                () => false, (_, _) => Task.CompletedTask, CancellationToken.None).GetAwaiter().GetResult(); }
+            catch (InvalidOperationException) { blocked = true; }
+            Check("changed foreground cancels before moving", blocked && moves == 0);
+            using (var cancelled = new CancellationTokenSource())
+            {
+                cancelled.Cancel(); blocked = false;
+                try { PointerPlacement.MoveUntilStableAsync(targetPoint, () => { moves++; return true; }, () => targetPoint,
+                    () => true, (_, _) => Task.CompletedTask, cancelled.Token).GetAwaiter().GetResult(); }
+                catch (OperationCanceledException) { blocked = true; }
+                Check("cancelled switch does not move", blocked && moves == 0);
+            }
+            var activity = Path.Combine(output, "activity-test.log");
+            File.WriteAllText(activity, new string('x', ActivityLog.MaximumBytes));
+            ActivityLog.Append(activity, "test\nentry");
+            Check("activity log rotates with one backup", File.Exists(activity + ".previous") && new FileInfo(activity).Length < 500 && File.ReadAllText(activity).Contains("test entry"));
             Check("multiple input paths deduplicated", dedup.Accept("a", "hook", 1234) && !dedup.Accept("a", "raw", 1234) && !dedup.Accept("a", "system", 1235));
             Check("quick second press allowed", dedup.Accept("a", "hook", 1250));
             dedup.Clear(); Check("native timestamp wrap", dedup.Accept("a", "hook", uint.MaxValue - 5) && !dedup.Accept("a", "raw", 5));

@@ -877,8 +877,11 @@ public sealed partial class MainForm : Form
                     if (Environment.TickCount64 >= releaseDeadline) throw new InvalidOperationException("请先松开 Ctrl / Alt / Shift / Win，再运行方案");
                     await Task.Delay(10, cts.Token);
                 }
-                await DesktopSwitcher.PrepareAsync(current, cts.Token, Log);
-                await _executor.RunAsync(current, cts.Token);
+                if (!await DesktopSwitcher.TryVmwareMoveAsync(current, _rawInputCheck.Checked, cts.Token, Log))
+                {
+                    await DesktopSwitcher.PrepareAsync(current, cts.Token, Log);
+                    await _executor.RunAsync(current, cts.Token);
+                }
                 completed = true;
                 PostToUi(() =>
                 {
@@ -1002,6 +1005,7 @@ public sealed partial class MainForm : Form
         _logList.Items.Insert(0, $"[{timestamp}] {message}");
         while (_logList.Items.Count > 200)
             _logList.Items.RemoveAt(_logList.Items.Count - 1);
+        if (!_preview) ActivityLog.Append(Path.Combine(Path.GetDirectoryName(_store.FilePath)!, "activity.log"), message);
     }
 
     private static MacroStep CloneStep(MacroStep step)

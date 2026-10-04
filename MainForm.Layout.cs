@@ -226,10 +226,10 @@ public sealed partial class MainForm
         _diagnosticCheck.Text = "只检测快捷键，不执行方案"; _diagnosticCheck.AutoSize = true; _diagnosticCheck.Margin = new(4, 10, 16, 0);
         _diagnosticCheck.CheckedChanged += (_, _) => { if (_hotkeys is not null) _hotkeys.DiagnosticMode = _diagnosticCheck.Checked; };
         tools.Controls.Add(_diagnosticCheck); tools.Controls.Add(CreateButton("重新连接监听", () => RebuildHotkeys(true), 144)); panel.Controls.Add(tools, 0, 1);
-        _rawInputCheck.Text = "启用后台输入补充（VMware / UU 远程）"; _rawInputCheck.AutoSize = true;
+        _rawInputCheck.Text = "启用远程兼容（后台输入 + VMware 切回）"; _rawInputCheck.AutoSize = true;
         _rawInputCheck.CheckedChanged += (_, _) => { if (_isBinding) return; SavePreferences(); RebuildHotkeys(); };
         var raw = Grid(1, 2); raw.RowStyles.Add(new(SizeType.Absolute, 30)); raw.RowStyles.Add(new(SizeType.Percent, 100));
-        raw.Controls.Add(_rawInputCheck, 0, 0); raw.Controls.Add(Hint("后台输入不拦截按键；进入 VMware 后最多重连监听两次。建议使用专用键，避免远端同时响应。"), 0, 1);
+        raw.Controls.Add(_rawInputCheck, 0, 0); raw.Controls.Add(Hint("后台输入会透传按键。VMware 跨窗口切屏会重试定位，稳定后点击；每次抓取最多重连监听两次。"), 0, 1);
         panel.Controls.Add(raw, 0, 2);
         _lastSignal.Dock = DockStyle.Fill; _lastSignal.Font = Theme.BodyFont; _lastSignal.ForeColor = Theme.CurrentAccent;
         _lastSignal.Text = "尚未检测。勾选“只检测”，切到 VMware / UU 后按方案快捷键，再回来查看来源。";
