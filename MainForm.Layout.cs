@@ -3,7 +3,7 @@ namespace TinyMouseMacro;
 public sealed partial class MainForm
 {
     private readonly Label _saveState = new(), _stepSummary = new(), _backendLabel = new(), _lastSignal = new();
-    private readonly Button _recordButton = new(), _pauseButton = new(), _runButton = new();
+    private readonly SoftButton _recordButton = new(), _pauseButton = new(), _runButton = new();
     private readonly ThemeToggleButton _themeButton = new();
     private readonly CheckBox _diagnosticCheck = new();
     private readonly CheckBox _externalTriggerCheck = new();
@@ -25,8 +25,8 @@ public sealed partial class MainForm
     {
         SuspendLayout();
         var root = Grid(1, 4, 18);
-        root.RowStyles.Add(new(SizeType.Absolute, 68));
-        root.RowStyles.Add(new(SizeType.Absolute, 84));
+        root.RowStyles.Add(new(SizeType.Absolute, 60));
+        root.RowStyles.Add(new(SizeType.Absolute, 76));
         root.RowStyles.Add(new(SizeType.Percent, 100));
         root.RowStyles.Add(new(SizeType.Absolute, 38));
         Controls.Add(root);
@@ -49,7 +49,7 @@ public sealed partial class MainForm
         body.Padding = new(0, 12, 0, 0); root.Controls.Add(body, 0, 2);
         body.Controls.Add(BuildSidebar(), 0, 0);
         var workspace = Grid(1, 2); workspace.Padding = new(18, 0, 0, 0);
-        workspace.RowStyles.Add(new(SizeType.Absolute, 90));
+        workspace.RowStyles.Add(new(SizeType.Absolute, 70));
         workspace.RowStyles.Add(new(SizeType.Percent, 100));
         workspace.Controls.Add(BuildIdentity(), 0, 0);
         _composePanel = BuildComposer(); _optionsPanel = BuildOptions(); _diagnosticsPanel = BuildDiagnostics();
@@ -77,7 +77,7 @@ public sealed partial class MainForm
 
     private Control BuildSidebar()
     {
-        var panel = Grid(1, 5, 12);
+        var panel = Grid(1, 5, 12, rounded: true);
         panel.RowStyles.Add(new(SizeType.Absolute, 36)); panel.RowStyles.Add(new(SizeType.Absolute, 42));
         panel.RowStyles.Add(new(SizeType.Percent, 100)); panel.RowStyles.Add(new(SizeType.Absolute, 46));
         panel.RowStyles.Add(new(SizeType.Absolute, 74));
@@ -91,7 +91,7 @@ public sealed partial class MainForm
         panel.Controls.Add(_profileList, 0, 2);
         var buttons = Flow(); buttons.Controls.Add(CreateAccentButton("＋ 新建方案", AddProfile, 125));
         var more = CreateButton("更多 ⋯", () => { }, 73);
-        var menu = new ContextMenuStrip(); more.ContextMenuStrip = menu; more.Disposed += (_, _) => menu.Dispose();
+        var menu = new AppMenu(); more.ContextMenuStrip = menu; more.Disposed += (_, _) => menu.Dispose();
         menu.Items.Add("复制当前方案", null, (_, _) => DuplicateProfile());
         menu.Items.Add("导入方案…", null, (_, _) => ImportProfile());
         menu.Items.Add("导出当前方案…", null, (_, _) => ExportProfile());
@@ -153,9 +153,9 @@ public sealed partial class MainForm
 
     private Control BuildComposer()
     {
-        var panel = Grid(1, 5, 12);
-        panel.RowStyles.Add(new(SizeType.Absolute, 32)); panel.RowStyles.Add(new(SizeType.Absolute, 114));
-        panel.RowStyles.Add(new(SizeType.Absolute, 58)); panel.RowStyles.Add(new(SizeType.Percent, 100)); panel.RowStyles.Add(new(SizeType.Absolute, 46));
+        var panel = Grid(1, 5, 12, rounded: true);
+        panel.RowStyles.Add(new(SizeType.Absolute, 28)); panel.RowStyles.Add(new(SizeType.Absolute, 96));
+        panel.RowStyles.Add(new(SizeType.Absolute, 50)); panel.RowStyles.Add(new(SizeType.Percent, 100)); panel.RowStyles.Add(new(SizeType.Absolute, 46));
         var title = Grid(2, 1); title.ColumnStyles.Add(new(SizeType.Percent, 100)); title.ColumnStyles.Add(new(SizeType.Absolute, 300));
         title.Controls.Add(Heading("选择鼠标位置"), 0, 0);
         _livePositionLabel.Dock = DockStyle.Fill; _livePositionLabel.TextAlign = ContentAlignment.MiddleRight;
@@ -163,7 +163,7 @@ public sealed partial class MainForm
         title.Controls.Add(_livePositionLabel, 1, 0); panel.Controls.Add(title, 0, 0);
         _screenMap.Dock = DockStyle.Fill; _screenMap.AccessibleName = "显示器布局：点击设置目标位置，不会移动真实鼠标";
         _screenMap.PointChosen += point => SetTargetPoint(point); panel.Controls.Add(_screenMap, 0, 1);
-        var actions = Grid(4, 1); actions.Padding = new(0, 7, 0, 7);
+        var actions = Grid(4, 1); actions.Padding = new(0, 3, 0, 3);
         foreach (var width in new[] { 29f, 20f, 25f, 26f }) actions.ColumnStyles.Add(new(SizeType.Percent, width));
         var pick = CreateButton("定位点击（3 秒后）", async () => await CapturePointAfterDelayAsync(true), 160);
         _tips.SetToolTip(pick, "点击后把鼠标移到目标位置，3 秒后添加左键点击步骤。此时只记住位置。");
@@ -175,7 +175,7 @@ public sealed partial class MainForm
         var actionButtons = new Button[] { pick, delay, _recordButton, add };
         for (var i = 0; i < actionButtons.Length; i++) { actionButtons[i].Dock = DockStyle.Fill; actions.Controls.Add(actionButtons[i], i, 0); }
         panel.Controls.Add(actions, 0, 2);
-        var steps = Grid(1, 2); steps.RowStyles.Add(new(SizeType.Absolute, 36)); steps.RowStyles.Add(new(SizeType.Percent, 100));
+        var steps = Grid(1, 2); steps.RowStyles.Add(new(SizeType.Absolute, 28)); steps.RowStyles.Add(new(SizeType.Percent, 100));
         _stepSummary.Dock = DockStyle.Fill; _stepSummary.Tag = ThemeRoleSectionHeader; _stepSummary.Font = Theme.SectionFont; _stepSummary.ForeColor = Theme.CurrentTextPrimary;
         _stepSummary.TextAlign = ContentAlignment.MiddleLeft; steps.Controls.Add(_stepSummary, 0, 0);
         _stepList.Dock = DockStyle.Fill; _stepList.IntegralHeight = false; _stepList.DataSource = _stepsSource;
@@ -286,10 +286,11 @@ public sealed partial class MainForm
 
     private void SetupNumber(NumericUpDown input, Action update)
     { Theme.StyleNumericUpDown(input); input.ValueChanged += (_, _) => { if (_isBinding) return; update(); MarkDirty(); }; }
-    private static TableLayoutPanel Grid(int columns, int rows, int padding = 0)
+    private static TableLayoutPanel Grid(int columns, int rows, int padding = 0, bool rounded = false)
     {
-        var grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = columns, RowCount = rows,
-            Padding = new(padding), Margin = Padding.Empty, BackColor = Theme.CurrentBg };
+        TableLayoutPanel grid = rounded ? new SurfaceGrid() : new TableLayoutPanel();
+        grid.Dock = DockStyle.Fill; grid.ColumnCount = columns; grid.RowCount = rows;
+        grid.Padding = new(padding); grid.Margin = Padding.Empty; grid.BackColor = Theme.CurrentBg;
         if (columns == 1) grid.ColumnStyles.Add(new(SizeType.Percent, 100));
         if (rows == 1) grid.RowStyles.Add(new(SizeType.Percent, 100));
         return grid;
@@ -298,7 +299,7 @@ public sealed partial class MainForm
     private static Label Heading(string text) => new() { Text = text, Tag = ThemeRoleSectionHeader, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, Font = Theme.SectionFont, ForeColor = Theme.CurrentTextPrimary, AutoEllipsis = true };
     private static Label Hint(string text, int width = 0) => new() { Text = text, Dock = width == 0 ? DockStyle.Fill : DockStyle.None, Width = width, Height = 38, Font = Theme.SmallFont, ForeColor = Theme.CurrentTextSecondary, TextAlign = ContentAlignment.MiddleLeft };
     private Button CreateButton(string text, Action action, int width)
-    { var b = new Button { Text = text, AccessibleName = text, Width = width, Height = 38, Margin = new(3) }; Theme.StyleButton(b); b.Click += (_, _) => action(); return b; }
+    { var b = new SoftButton { Text = text, AccessibleName = text, Width = width, Height = 38, Margin = new(3) }; Theme.StyleButton(b); b.Click += (_, _) => action(); return b; }
     private Button CreateAccentButton(string text, Action action, int width)
     { var b = CreateButton(text, action, width); b.Tag = ThemeRoleAccentButton; Theme.StyleAccentButton(b); return b; }
     private void AddCustomStep()
@@ -306,8 +307,15 @@ public sealed partial class MainForm
         if (IsCapturing || CurrentProfile is null) return;
         var step = new MacroStep { Type = MacroStepType.Move };
         using var dialog = new StepEditDialog(step) { Text = "添加动作", StartPosition = FormStartPosition.CenterParent };
-        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        if (ShowStepEditor(dialog) != DialogResult.OK) return;
         ApplyStepEdit(step, dialog); AddStep(step);
+    }
+    private DialogResult ShowStepEditor(StepEditDialog dialog)
+    {
+        var suspended = _hotkeys?.Suspended ?? false;
+        if (_hotkeys is not null) _hotkeys.Suspended = true;
+        try { return dialog.ShowDialog(this); }
+        finally { if (_hotkeys is not null) _hotkeys.Suspended = suspended || IsCapturing; RebuildHotkeys(); }
     }
     private static bool IsPositionStep(MacroStepType t) => t is MacroStepType.Move or MacroStepType.LeftClick or MacroStepType.RightClick or MacroStepType.DoubleClick or MacroStepType.MiddleClick;
     private void SetTargetPoint(Point point)

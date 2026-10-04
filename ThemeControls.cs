@@ -22,7 +22,7 @@ internal sealed class ThemeToggleButton : Button
         e.Graphics.TranslateTransform(Width / 2f, Height / 2f); e.Graphics.ScaleTransform(scale, scale);
         using var pen = new Pen(Theme.CurrentTextPrimary, 1.8f);
         using var fill = new SolidBrush(Theme.CurrentTextPrimary);
-        if (Theme.IsDark)
+        if (!Theme.IsDark)
         {
             e.Graphics.DrawEllipse(pen, -5, -5, 10, 10);
             for (var i = 0; i < 8; i++)

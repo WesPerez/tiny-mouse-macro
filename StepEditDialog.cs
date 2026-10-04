@@ -2,9 +2,10 @@ namespace TinyMouseMacro;
 
 internal sealed class StepEditDialog : Form
 {
-    private readonly ComboBox _typeBox = new();
-    private readonly ComboBox _categoryBox = new();
+    private readonly SoftComboBox _typeBox = new();
+    private readonly SoftComboBox _categoryBox = new();
     private readonly Label _actionHint = new();
+    private readonly KeyCaptureBox _keyCapture = new();
     private readonly TableLayoutPanel _fields;
     private readonly NumericUpDown _recordedDelayBox = new() { Minimum = 0, Maximum = 86400000 };
     private readonly bool _hasRecordedTiming;
@@ -16,8 +17,8 @@ internal sealed class StepEditDialog : Form
     private readonly NumericUpDown _dragEndXBox = new() { Minimum = -100000, Maximum = 100000 };
     private readonly NumericUpDown _dragEndYBox = new() { Minimum = -100000, Maximum = 100000 };
     private readonly NumericUpDown _wheelDeltaBox = new() { Minimum = -12000, Maximum = 12000, Increment = 120 };
-    private readonly ComboBox _keyPressBox = new();
-    private readonly ComboBox _keyComboBox = new();
+    private readonly SoftComboBox _keyPressBox = new();
+    private readonly SoftComboBox _keyComboBox = new();
     private readonly FlowLayoutPanel _modifierPanel = new();
     private readonly CheckBox[] _modifiers = [new(), new(), new(), new()];
     private readonly TextBox _typeTextBox = new();
@@ -79,6 +80,7 @@ internal sealed class StepEditDialog : Form
 
     public StepEditDialog(MacroStep step)
     {
+        SuspendLayout();
         Text = UiText.EditStepTitle;
         _hasRecordedTiming = step.RecordedDelayMs.HasValue;
         Size = new Size(600, 590);
@@ -92,6 +94,7 @@ internal sealed class StepEditDialog : Form
         AutoScroll = true;
 
         var root = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 3, ColumnCount = 1, Padding = new Padding(22) };
+        root.SuspendLayout();
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 104)); root.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); root.RowStyles.Add(new RowStyle(SizeType.Absolute, 56));
         Controls.Add(root);
         var header = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 2 };
@@ -107,9 +110,10 @@ internal sealed class StepEditDialog : Form
         scroll.BackColor = Theme.CurrentSurface;
         root.Controls.Add(scroll, 0, 1);
         var panel = _fields = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2, RowCount = 22 };
+        panel.SuspendLayout();
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 138));
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        for (var i = 0; i < 22; i++) panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        for (var i = 0; i < 22; i++) panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 0));
         scroll.Controls.Add(panel);
 
         _typeBox.DropDownStyle = ComboBoxStyle.DropDownList;
@@ -143,6 +147,14 @@ internal sealed class StepEditDialog : Form
         Theme.StyleNumericUpDown(_wheelDeltaBox);
 
         _keyPressBox.DropDownStyle = ComboBoxStyle.DropDownList;
+        foreach (var selector in new[] { _keyPressBox, _keyComboBox })
+        {
+            selector.BeginUpdate();
+            selector.FormattingEnabled = true; selector.MaxDropDownItems = 14;
+            selector.Format += (_, e) => { if (e.ListItem is Keys value) e.Value = KeyDisplay.Name(value); };
+            selector.AccessibleName = "要按下的键";
+            Theme.StyleComboBox(selector);
+        }
         _keyPressBox.Dock = DockStyle.Fill;
         var keyNames = new List<Keys>();
         for (var k = (int)Keys.A; k <= (int)Keys.Z; k++) keyNames.Add((Keys)k);
@@ -160,19 +172,15 @@ internal sealed class StepEditDialog : Form
         _keyPressBox.Items.AddRange(keyNames.Cast<object>().ToArray());
         var keyIdx = keyNames.IndexOf((Keys)step.KeyCode);
         _keyPressBox.SelectedIndex = keyIdx >= 0 ? keyIdx : 0;
-        Theme.StyleComboBox(_keyPressBox);
 
         _keyComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
         _keyComboBox.Dock = DockStyle.Fill;
         _keyComboBox.Items.AddRange(keyNames.Cast<object>().ToArray());
         var comboKeyIdx = keyNames.IndexOf((Keys)step.KeyCode);
         _keyComboBox.SelectedIndex = comboKeyIdx >= 0 ? comboKeyIdx : 0;
-        Theme.StyleComboBox(_keyComboBox);
         foreach (var selector in new[] { _keyPressBox, _keyComboBox })
         {
-            selector.FormattingEnabled = true; selector.MaxDropDownItems = 14;
-            selector.Format += (_, e) => { if (e.ListItem is Keys value) e.Value = KeyDisplay.Name(value); };
-            selector.AccessibleName = "要按下的键";
+            selector.EndUpdate();
         }
 
         _modifierPanel.Dock = DockStyle.Fill; _modifierPanel.WrapContents = false;
@@ -271,8 +279,13 @@ internal sealed class StepEditDialog : Form
         panel.Controls.Add(_wheelLabel, 0, 6);
         panel.Controls.Add(_wheelDeltaBox, 1, 6);
         panel.Controls.Add(_keyLabel, 0, 7);
-        var keyPanel = new Panel { Dock = DockStyle.Fill, Height = 34 };
-        keyPanel.Controls.Add(_keyPressBox); keyPanel.Controls.Add(_keyComboBox);
+        var keyPanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
+        keyPanel.RowStyles.Add(new(SizeType.Percent, 50)); keyPanel.RowStyles.Add(new(SizeType.Percent, 50));
+        _keyCapture.Dock = DockStyle.Fill; Theme.StyleTextBox(_keyCapture);
+        _keyCapture.KeyCaptured += ApplyCapturedKey;
+        keyPanel.Controls.Add(_keyCapture, 0, 0);
+        var keySelectors = new Panel { Dock = DockStyle.Fill };
+        keySelectors.Controls.Add(_keyPressBox); keySelectors.Controls.Add(_keyComboBox); keyPanel.Controls.Add(keySelectors, 0, 1);
         panel.Controls.Add(keyPanel, 1, 7);
         panel.Controls.Add(_modifierLabel, 0, 8);
         panel.Controls.Add(_modifierPanel, 1, 8);
@@ -304,11 +317,11 @@ internal sealed class StepEditDialog : Form
         var buttonPanel = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(0, 6, 0, 0) };
         Theme.StylePanel(buttonPanel);
 
-        var cancelBtn = new Button { Text = UiText.Cancel, Width = 90, Height = 38 };
+        var cancelBtn = new SoftButton { Text = UiText.Cancel, Width = 90, Height = 38 };
         Theme.StyleButton(cancelBtn);
         cancelBtn.Click += (_, _) => { DialogResult = DialogResult.Cancel; Close(); };
 
-        var okBtn = new Button { Text = "保存动作", Width = 108, Height = 38 };
+        var okBtn = new SoftButton { Text = "保存动作", Width = 108, Height = 38 };
         Theme.StyleAccentButton(okBtn);
         okBtn.Click += (_, _) => { DialogResult = DialogResult.OK; Close(); };
 
@@ -329,12 +342,14 @@ internal sealed class StepEditDialog : Form
         CancelButton = cancelBtn;
 
         UpdateFieldVisibility();
+        panel.ResumeLayout(false); root.ResumeLayout(false); ResumeLayout(false);
         AutoScaleMode = AutoScaleMode.Dpi; AutoScaleDimensions = new SizeF(96, 96); PerformAutoScale();
         _dialogScaled = true;
     }
 
     private void UpdateFieldVisibility()
     {
+        _fields.SuspendLayout();
         var type = StepType;
         _actionHint.Text = DescriptionOf(type);
         var isClick = type is MacroStepType.LeftClick or MacroStepType.RightClick or MacroStepType.DoubleClick or MacroStepType.MiddleClick;
@@ -386,9 +401,22 @@ internal sealed class StepEditDialog : Form
             for (var i = 0; i < visibleRows.Length; i++)
             {
                 _fields.RowStyles[i].SizeType = SizeType.Absolute;
-                _fields.RowStyles[i].Height = visibleRows[i] ? 48 * (_dialogScaled ? DeviceDpi / 96f : 1) : 0;
+                _fields.RowStyles[i].Height = visibleRows[i] ? (i == 7 ? 88 : 48) * (_dialogScaled ? DeviceDpi / 96f : 1) : 0;
             }
         }
+        _fields?.ResumeLayout(true);
+    }
+
+    internal void ApplyCapturedKey(Keys key, uint modifiers)
+    {
+        if (StepType is not (MacroStepType.KeyPress or MacroStepType.KeyCombo)) return;
+        if (modifiers != 0 && StepType == MacroStepType.KeyPress)
+            _typeBox.SelectedItem = Actions.First(a => a.Type == MacroStepType.KeyCombo);
+        foreach (var selector in new[] { _keyPressBox, _keyComboBox })
+        { if (!selector.Items.Contains(key)) selector.Items.Add(key); selector.SelectedItem = key; }
+        if (StepType == MacroStepType.KeyCombo)
+            foreach (var modifier in _modifiers) modifier.Checked = (modifiers & (uint)modifier.Tag!) != 0;
+        _keyCapture.Text = modifiers == 0 ? KeyDisplay.Name(key) : HotkeyParser.Normalize(modifiers, (uint)key);
     }
 
     private static Label CreateDialogLabel(string text)
@@ -416,11 +444,13 @@ internal sealed class StepEditDialog : Form
         MacroStepType.RunProgram or MacroStepType.PlaySound or MacroStepType.ChainMacro => 4, _ => 0 };
     private void SelectCategory(int category, MacroStepType? selected = null)
     {
+        _typeBox.BeginUpdate();
         _categoryBox.SelectedIndex = category;
         _typeBox.Items.Clear();
         _typeBox.Items.AddRange(Actions.Where(a => CategoryOf(a.Type) == category).Cast<object>().ToArray());
         _typeBox.SelectedItem = Actions.FirstOrDefault(a => a.Type == selected);
         if (_typeBox.SelectedIndex < 0) _typeBox.SelectedIndex = 0;
+        _typeBox.EndUpdate();
     }
     private static string DescriptionOf(MacroStepType type) => type switch {
         MacroStepType.KeyPress => "选择要按下并松开的键，包括 Alt、Ctrl、Shift 和功能键。",

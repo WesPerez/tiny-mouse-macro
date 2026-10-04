@@ -3,7 +3,10 @@ using System.Runtime.InteropServices;
 
 namespace TinyMouseMacro;
 
-public sealed record HotkeySignal(string ProfileId, string Shortcut, string Source, bool Diagnostic);
+public sealed record HotkeySignal(string ProfileId, string Shortcut, string Source, bool Diagnostic)
+{
+    internal TriggerReleaseGate? ReleaseGate { get; init; }
+}
 
 public sealed class HotkeyService : IDisposable
 {
@@ -16,6 +19,7 @@ public sealed class HotkeyService : IDisposable
     private readonly HashSet<int> _swallowed = [];
     private readonly KeyEventState _hookState = new(), _rawState = new();
     private readonly TriggerDeduplicator _dedup = new();
+    private readonly List<(string Source, TriggerReleaseGate Gate)> _releaseGates = [];
     private NativeMethods.LowLevelKeyboardProc? _keyboardProc;
     private NativeMethods.LowLevelMouseProc? _mouseProc;
     private nint _keyboardHook, _mouseHook;
@@ -170,6 +174,7 @@ public sealed class HotkeyService : IDisposable
                 _lastKeyboardActivity = Environment.TickCount64;
                 var down = message is NativeMethods.WmKeyDown or NativeMethods.WmSysKeyDown;
                 var fresh = _hookState.Update(key, down);
+                if (!down) ObserveTriggerRelease("hook", key);
                 if (!down && _swallowed.Remove(key)) return 1;
                 if (down && _swallowed.Contains(key)) return 1;
                 if (down && fresh && _keyboard.TryGetValue(new(key, _hookState.Modifiers), out var b) && CanDispatch(b))
@@ -177,7 +182,7 @@ public sealed class HotkeyService : IDisposable
                     return HotkeyHookRoute.Handle(_systemChords.Contains(b.Chord),
                         _remoteForeground && NativeMethods.GetForegroundWindow() == _lastForeground,
                         () => NativeMethods.CallNextHookEx(_keyboardHook, code, message, data),
-                        swallowFollowing => { Dispatch(b, "键盘监听", kb.Time); if (swallowFollowing) _swallowed.Add(key); });
+                        swallowFollowing => { Dispatch(b, "键盘监听", kb.Time, "hook", _hookState); if (swallowFollowing) _swallowed.Add(key); });
                 }
                 if (down && fresh) ReportUnmatchedKey(key, _hookState.Modifiers, "键盘监听");
             }
@@ -213,13 +218,25 @@ public sealed class HotkeyService : IDisposable
     }
 
     private bool CanDispatch(Binding b) => b.Id == "$stop" || (!_suspended && (b.Id == "$pause" || !_paused));
-    private void Dispatch(Binding b, string source, uint time)
+    private void Dispatch(Binding b, string source, uint time, string? releaseSource = null, KeyEventState? state = null)
     {
         if (!_dedup.Accept(b.Id, source, time)) return;
         if (b.Id == "$stop") { EmergencyStop?.Invoke(); return; }
         if (b.Id == "$pause") { _thread.Post(() => PauseRequested?.Invoke()); return; }
-        var signal = new HotkeySignal(b.Id, b.Chord.Key == 0 ? "鼠标键" : b.Chord.ToString(), source, _diagnostic);
+        // A downstream console hook can consume Shift before Windows updates its async
+        // key state. Keep this trigger's observed keys until their actual key-up events.
+        // A later state-recovery poll must not erase this evidence.
+        var gate = state is null ? null : new TriggerReleaseGate(state.PressedModifiers);
+        if (gate is { IsReleased: false }) _releaseGates.Add((releaseSource!, gate));
+        var signal = new HotkeySignal(b.Id, b.Chord.Key == 0 ? "鼠标键" : b.Chord.ToString(), source, _diagnostic) { ReleaseGate = gate };
         _thread.Post(() => Triggered?.Invoke(signal));
+    }
+
+    private void ObserveTriggerRelease(string source, int key)
+    {
+        foreach (var pending in _releaseGates)
+            if (pending.Source == source) pending.Gate.ObserveKeyUp(key);
+        _releaseGates.RemoveAll(pending => pending.Gate.IsReleased || pending.Gate.Expired);
     }
 
     private void OnMessage(int message, nint wParam, nint lParam)
@@ -250,10 +267,11 @@ public sealed class HotkeyService : IDisposable
             if (key == (int)Keys.Menu) key = (kb.Flags & 2) != 0 ? (int)Keys.RMenu : (int)Keys.LMenu;
             if (key == (int)Keys.ShiftKey) key = kb.MakeCode == 0x36 ? (int)Keys.RShiftKey : (int)Keys.LShiftKey;
             var down = (kb.Flags & 1) == 0;
+            if (!down) ObserveTriggerRelease("raw", key);
             if (_rawState.Update(key, down) && down)
             {
                 if (_keyboard.TryGetValue(new(key, _rawState.Modifiers), out var b) && CanDispatch(b))
-                    Dispatch(b, "后台输入（不拦截）", unchecked((uint)NativeMethods.GetMessageTime()));
+                    Dispatch(b, "后台输入（不拦截）", unchecked((uint)NativeMethods.GetMessageTime()), "raw", _rawState);
                 else ReportUnmatchedKey(key, _rawState.Modifiers, "后台输入");
             }
         }
@@ -265,6 +283,7 @@ public sealed class HotkeyService : IDisposable
         1, (uint)Marshal.SizeOf<NativeMethods.RawInputDevice>());
     private void RecoverKeyState()
     {
+        _releaseGates.RemoveAll(pending => pending.Gate.IsReleased || pending.Gate.Expired);
         var foreground = NativeMethods.GetForegroundWindow();
         if (foreground != _lastForeground)
         {
@@ -352,6 +371,7 @@ public sealed class HotkeyService : IDisposable
         if (_rawEnabled) SetRawInput(false);
         _rawEnabled = false;
         _hookState.Clear(); _rawState.Clear(); _swallowed.Clear(); _dedup.Clear();
+        _releaseGates.Clear();
     }
     private static string LastError() => new Win32Exception(Marshal.GetLastWin32Error()).Message;
     public void Dispose()
@@ -423,6 +443,7 @@ internal sealed class RemoteReconnectBudget
 internal sealed class KeyEventState
 {
     private readonly HashSet<int> _down = [];
+    internal IEnumerable<int> PressedModifiers => _down.Where(k => HotkeyParser.IsModifierKey((Keys)k));
     public bool Update(int key, bool down) => down ? _down.Add(key) : _down.Remove(key);
     public uint Modifiers => (Has(Keys.ControlKey, Keys.LControlKey, Keys.RControlKey) ? 2u : 0) |
         (Has(Keys.Menu, Keys.LMenu, Keys.RMenu) ? 1u : 0) | (Has(Keys.ShiftKey, Keys.LShiftKey, Keys.RShiftKey) ? 4u : 0) |
@@ -435,6 +456,23 @@ internal sealed class KeyEventState
     }
     public void RemoveReleasedKeys() => _down.RemoveWhere(k => (NativeMethods.GetAsyncKeyState(k) & 0x8000) == 0);
     public void Clear() => _down.Clear();
+}
+
+// Per-trigger snapshot, never synchronized from GetAsyncKeyState. Hook callbacks
+// mutate the set; the UI only reads the volatile completion flag. Missing key-up
+// fails closed at the existing playback deadline instead of typing Shift+Alt.
+internal sealed class TriggerReleaseGate(IEnumerable<int> keys)
+{
+    private readonly HashSet<int> _held = new(keys);
+    private readonly long _created = Environment.TickCount64;
+    private volatile bool _released = !keys.Any();
+    internal bool IsReleased => _released;
+    internal bool Expired => Environment.TickCount64 - _created > 2000;
+    internal void ObserveKeyUp(int key)
+    {
+        _held.Remove(key);
+        if (_held.Count == 0) _released = true;
+    }
 }
 
 internal sealed class TriggerDeduplicator

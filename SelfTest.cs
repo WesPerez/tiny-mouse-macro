@@ -32,6 +32,20 @@ internal static class SelfTest
             Check("autorepeat suppressed", state.Update((int)Keys.F13, true) && !state.Update((int)Keys.F13, true));
             state.Update((int)Keys.F13, false); Check("next physical press allowed", state.Update((int)Keys.F13, true));
             var dedup = new TriggerDeduplicator();
+            var releaseState = new KeyEventState(); releaseState.Update((int)Keys.LShiftKey, true);
+            var releaseGate = new TriggerReleaseGate(releaseState.PressedModifiers);
+            releaseState.Clear();
+            Check("captured Shift stays pending when Windows reports no modifiers", PhysicalModifiers.Read(_ => false) == 0 && !releaseGate.IsReleased);
+            releaseGate.ObserveKeyUp((int)Keys.X);
+            Check("main-key release does not mistake Shift Alt for standalone Alt", !releaseGate.IsReleased);
+            releaseGate.ObserveKeyUp((int)Keys.LShiftKey);
+            Check("actual Shift key-up permits standalone Alt playback", releaseGate.IsReleased);
+            releaseGate = new TriggerReleaseGate([(int)Keys.LShiftKey, (int)Keys.RShiftKey]);
+            releaseGate.ObserveKeyUp((int)Keys.LShiftKey);
+            Check("trigger release guard preserves both modifier sides", !releaseGate.IsReleased);
+            releaseGate.ObserveKeyUp((int)Keys.RShiftKey);
+            Check("both modifier releases complete the trigger guard", releaseGate.IsReleased);
+            Check("unmodified trigger needs no key release wait", new TriggerReleaseGate([]).IsReleased);
             var forwarded = 0; var dispatched = 0; var swallowFollowing = false;
             nint Forward() { forwarded++; return 0; }
             void Dispatch(bool swallow) { dispatched++; swallowFollowing = swallow; }
@@ -205,7 +219,8 @@ internal static class SelfTest
                 for (var tab = 0; tab < 3; tab++)
                 {
                     form.RenderPreview(Path.Combine(output, $"ui-{size.Width}-{tab}.png"), tab);
-                    Check($"layout {size.Width} tab {tab}", form.ValidatePreviewLayout(out var error));
+                    var validLayout = form.ValidatePreviewLayout(out var error);
+                    Check($"layout {size.Width} tab {tab}: {error}", validLayout);
                 }
                 form.VerifyPreviewInteractions(Check);
                 form.VerifyExecutionLifecycle(Check);
@@ -218,10 +233,14 @@ internal static class SelfTest
                 form.RenderPreview(Path.Combine(output, $"ui-{size.Width}-dark.png"), 0);
                 form.TogglePreviewTheme();
             }
+            var dialogTimings = new List<string>();
             for (var type = 0; type <= 19; type++)
             {
+                var dialogClock = System.Diagnostics.Stopwatch.StartNew();
                 using var dialog = new StepEditDialog(new() { Type = (MacroStepType)type, KeyCode = (int)Keys.F13, KeyModifiers = 3, DelayMs = 1250, DelayMsMax = 2750, RecordedDelayMs = 640 });
+                var constructedMs = dialogClock.Elapsed.TotalMilliseconds;
                 CreateHandles(dialog); dialog.PerformLayout();
+                dialogTimings.Add($"{type}: constructor {constructedMs:0.0} ms; with handles {dialogClock.Elapsed.TotalMilliseconds:0.0} ms");
                 Check($"step editor preserves type {type}", (int)dialog.StepType == type);
                 if (type == (int)MacroStepType.KeyCombo) Check("combo selector retains F13 and is parented", dialog.KeyComboCode == (int)Keys.F13 && FindField<ComboBox>(dialog, "_keyComboBox").Parent is not null);
                 if (type == (int)MacroStepType.KeyCombo) Check("compact modifiers retain Ctrl and Alt", dialog.KeyModifiers == 3);
@@ -240,6 +259,7 @@ internal static class SelfTest
                 if (type is 5 or 6 or 7 or 13)
                 { using var bitmap = new Bitmap(dialog.Width, dialog.Height); dialog.DrawToBitmap(bitmap, new(Point.Empty, bitmap.Size)); bitmap.Save(Path.Combine(output, $"step-{type}.png")); }
             }
+            File.WriteAllLines(Path.Combine(output, "dialog-timings.txt"), dialogTimings);
             File.WriteAllLines(Path.Combine(output, "results.txt"), results);
             return 0;
         }
@@ -353,6 +373,15 @@ public sealed partial class MainForm
         var follow = new MacroProfile { Name = "后续等待", Steps = [new() { Type = MacroStepType.Delay, DelayMs = 80 }] };
         var first = new MacroProfile { Name = "前置等待", Steps = [new() { Type = MacroStepType.Delay, DelayMs = 80 }, new() { Type = MacroStepType.ChainMacro, ChainMacroId = follow.Id }] };
         _profiles.Add(follow);
+        var release = new TriggerReleaseGate([(int)Keys.LShiftKey]);
+        var gatedRun = RunAndDrainAsync(follow, release);
+        check("playback waits for captured Shift before starting even with zero Windows state", !gatedRun.IsCompleted && !_executor.IsRunning);
+        release.ObserveKeyUp((int)Keys.LShiftKey);
+        PumpUntil(() => gatedRun.IsCompleted); gatedRun.GetAwaiter().GetResult();
+        check("captured Shift release starts the ordered playback", _activityTitle.Text.Contains("已完成"));
+        gatedRun = RunAndDrainAsync(follow, new TriggerReleaseGate([(int)Keys.LShiftKey]));
+        CancelExecution(); PumpUntil(() => gatedRun.IsCompleted); gatedRun.GetAwaiter().GetResult();
+        check("stop during trigger-release wait cancels before executor starts", !_executor.IsRunning && _activityTitle.Text == "已停止 · 后续等待");
         var run = RunAndDrainAsync(first);
         check("real execution shows running state before completion", _activityMode == ActivityMode.Running && _activityName == first.Name && _cancelButton.Enabled);
         PumpUntil(() => run.IsCompleted);

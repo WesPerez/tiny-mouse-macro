@@ -7,6 +7,7 @@ namespace TinyMouseMacro;
 internal interface IPlaybackDesktop
 {
     nint Foreground { get; }
+    long TickCount { get; }
     Point Cursor { get; }
     nint WindowAt(Point point);
     nint FindWindow(string title);
@@ -29,6 +30,20 @@ internal sealed class PlaybackSession(IPlaybackDesktop desktop, Action<string>? 
     private bool _acceptNextForeground;
     private nint _clickTarget;
     private bool _leavingRemote;
+    private long? _remoteKeyReleasedAt;
+
+    internal void BeginKeyboardAction(int keyCode)
+    {
+        VerifyFocus();
+        log?.Invoke($"发送按键 · {KeyDisplay.Name((Keys)keyCode)} · 前台 0x{_expected:X} · 远程 {IsRemote(_expected)}");
+    }
+
+    internal void CompleteKeyboardAction()
+    {
+        ObserveActionResult();
+        if (IsRemote(_expected)) _remoteKeyReleasedAt = desktop.TickCount;
+        log?.Invoke($"按键已提交并松开 · 前台 0x{_expected:X}（客户机接收结果未验证）");
+    }
 
     // RunProgram and explicit window-switch keys intentionally change the target. Bind at
     // the next action, after any recorded/manual wait for that application to become ready.
@@ -70,6 +85,20 @@ internal sealed class PlaybackSession(IPlaybackDesktop desktop, Action<string>? 
         VerifyFocus();
         if (target == _expected) return;
         var source = _expected;
+        // SendInput returning only means Windows queued the event. Keep the source
+        // console focused briefly after key-up so a subsequent click cannot immediately
+        // cancel its queued guest input. Real recorded/manual delays count toward this.
+        if (IsRemote(source) && _remoteKeyReleasedAt is long releasedAt)
+        {
+            var remaining = 100 - (desktop.TickCount - releasedAt);
+            if (remaining > 0)
+            {
+                log?.Invoke($"切换前等待按键送出 · 源 0x{source:X} · {remaining} ms");
+                await desktop.Delay((int)remaining, ct);
+            }
+            ct.ThrowIfCancellationRequested(); VerifyFocus();
+            _remoteKeyReleasedAt = null;
+        }
         log?.Invoke($"自动交接焦点 · 0x{source:X} → 0x{target:X}");
         await WindowActivation.EnsureForegroundAsync(source, target, () => desktop.Foreground,
             () => desktop.Activate(target), unchanged, desktop.Delay, ct, log, allowClickActivation);
@@ -189,6 +218,7 @@ internal sealed class PlaybackSession(IPlaybackDesktop desktop, Action<string>? 
 internal sealed class WindowsPlaybackDesktop : IPlaybackDesktop
 {
     public nint Foreground => NativeMethods.GetForegroundWindow();
+    public long TickCount => Environment.TickCount64;
     public Point Cursor => System.Windows.Forms.Cursor.Position;
     public nint WindowAt(Point point) => NativeMethods.GetAncestor(NativeMethods.WindowFromPoint(new() { X = point.X, Y = point.Y }), 2);
     public nint FindWindow(string title) => NativeMethods.FindWindowW(null, title);

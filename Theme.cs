@@ -122,13 +122,14 @@ internal static class Theme
         var text = lb.GetItemText(lb.Items[e.Index]);
         var isSelected = (e.State & DrawItemState.Selected) != 0;
 
-        using var bgBrush = new SolidBrush(isSelected ? CurrentListSelectedBg : CurrentListBg);
+        using var bgBrush = new SolidBrush(CurrentListBg);
         e.Graphics.FillRectangle(bgBrush, e.Bounds);
 
         if (isSelected)
         {
-            using var accentPen = new Pen(CurrentListSelected, 2);
-            e.Graphics.DrawLine(accentPen, e.Bounds.Left, e.Bounds.Top, e.Bounds.Left, e.Bounds.Bottom);
+            e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            using var path = RoundedGeometry.Path(Rectangle.Inflate(e.Bounds, -3, -3), 8 * lb.DeviceDpi / 96f);
+            using var selectedFill = new SolidBrush(CurrentListSelectedBg); e.Graphics.FillPath(selectedFill, path);
         }
 
         var color = isSelected ? CurrentAccent : CurrentTextPrimary;
@@ -161,7 +162,7 @@ internal static class Theme
         comboBox.FlatStyle = FlatStyle.Flat;
         comboBox.Font = BodyFont;
         comboBox.DrawMode = DrawMode.OwnerDrawFixed;
-        comboBox.ItemHeight = Math.Max(22, TextRenderer.MeasureText("快捷键", BodyFont).Height + 2);
+        comboBox.ItemHeight = Math.Max(28 * comboBox.DeviceDpi / 96, TextRenderer.MeasureText("快捷键", BodyFont).Height + 6);
         comboBox.DrawItem -= DrawComboItem;
         comboBox.DrawItem += DrawComboItem;
     }

@@ -33,9 +33,9 @@ public sealed partial class MainForm : Form
     private readonly ProfileListBox _profileList = new();
     private readonly TextBox _nameBox = new();
     private readonly TextBox _hotkeyBox = new();
-    private readonly ComboBox _triggerTypeBox = new();
+    private readonly SoftComboBox _triggerTypeBox = new();
     private readonly TextBox _hookKeyBox = new();
-    private readonly ComboBox _mouseButtonBox = new();
+    private readonly SoftComboBox _mouseButtonBox = new();
     private readonly NumericUpDown _repeatCountBox = new() { Minimum = 0, Maximum = 9999, Increment = 1 };
     private readonly NumericUpDown _repeatIntervalBox = new() { Minimum = 0, Maximum = 600000, Increment = 100 };
     private readonly CheckBox _enabledCheckBox = new();
@@ -92,7 +92,7 @@ public sealed partial class MainForm : Form
             Icon = TryLoadIcon(),
             Text = UiText.AppTitle,
             Visible = !preview,
-            ContextMenuStrip = new ContextMenuStrip()
+            ContextMenuStrip = new AppMenu()
         };
         _trayIcon.ContextMenuStrip.Items.Add(showItem);
         _trayIcon.ContextMenuStrip.Items.Add(autoStartItem);
@@ -100,7 +100,7 @@ public sealed partial class MainForm : Form
         _trayIcon.ContextMenuStrip.Items.Add(exitItem);
         _trayIcon.MouseDoubleClick += (_, _) => ShowFromTray();
 
-        _cancelButton = new Button
+        _cancelButton = new SoftButton
         {
             Text = UiText.CancelExecution,
             Width = 110,
@@ -125,7 +125,7 @@ public sealed partial class MainForm : Form
                 Log($"{signal.Shortcut} · {signal.Source}" + (signal.Diagnostic ? " · 仅检测" : ""), technical: true);
                 if (signal.Diagnostic || _diagnosticCheck.Checked || _globalPaused || IsCapturing) return;
                 var profile = _profiles.FirstOrDefault(p => p.Id == signal.ProfileId && p.Enabled);
-                if (profile is not null) RunMacro(profile);
+                if (profile is not null) RunMacro(profile, signal.ReleaseGate);
             });
             _hotkeys.EmergencyStop += () => { _stopRequested = true; _executor.Cancel(); PostToUi(StopAll); };
             _hotkeys.PauseRequested += () => PostToUi(ToggleGlobalPause);
@@ -376,7 +376,7 @@ public sealed partial class MainForm : Form
         dialog.Font = Theme.BodyFont;
         Theme.ApplyToForm(dialog);
 
-        if (dialog.ShowDialog(this) == DialogResult.OK)
+        if (ShowStepEditor(dialog) == DialogResult.OK)
         {
             ApplyStepEdit(step, dialog);
             RefreshSteps();
@@ -697,7 +697,7 @@ public sealed partial class MainForm : Form
         if (IsCapturing || CurrentProfile is null) return;
         var step = new MacroStep { Type = MacroStepType.Delay, DelayMs = 500 };
         using var dialog = new StepEditDialog(step) { Text = "加延迟", StartPosition = FormStartPosition.CenterParent };
-        if (dialog.ShowDialog(this) == DialogResult.OK) { ApplyStepEdit(step, dialog); AddStep(step); }
+        if (ShowStepEditor(dialog) == DialogResult.OK) { ApplyStepEdit(step, dialog); AddStep(step); }
     }
 
     private async void ToggleRecording()
@@ -863,7 +863,8 @@ public sealed partial class MainForm : Form
         RefreshActivityDisplay();
     }
 
-    private void RunMacro(MacroProfile profile)
+    private TriggerReleaseGate? _pendingReleaseGate;
+    private void RunMacro(MacroProfile profile, TriggerReleaseGate? releaseGate = null)
     {
         if (_preview || IsCapturing || _globalPaused || _diagnosticCheck.Checked) return;
         if (profile.RepeatCount == 0 && _hotkeys?.StopAvailable != true)
@@ -873,6 +874,7 @@ public sealed partial class MainForm : Form
             var active = _profiles.FirstOrDefault(p => p.Id == _runningProfileId);
             if (!_stopRequested && active is not null && _switchRequests.Offer(active, profile))
             {
+                _pendingReleaseGate = active.Id == profile.Id ? null : releaseGate;
                 var message = active.Id == profile.Id ? $"正在切换到：{profile.Name}" : $"接下来切换到：{profile.Name}";
                 SetStatus(message); Log(message);
             }
@@ -882,25 +884,26 @@ public sealed partial class MainForm : Form
 
         SetStatus(UiText.Running(profile.Name));
         Log(UiText.Running(profile.Name));
-        _ = RunAndDrainAsync(profile);
+        _ = RunAndDrainAsync(profile, releaseGate);
     }
 
-    private async Task RunAndDrainAsync(MacroProfile profile)
+    private async Task RunAndDrainAsync(MacroProfile profile, TriggerReleaseGate? releaseGate = null)
     {
         _stopRequested = false;
         _runningProfileId = profile.Id;
-        try { await RunWithCancellationAsync(profile); }
+        try { await RunWithCancellationAsync(profile, releaseGate); }
         finally
         {
             _runningProfileId = null;
             var nextId = _switchRequests.Take();
+            var nextGate = _pendingReleaseGate; _pendingReleaseGate = null;
             var next = _profiles.FirstOrDefault(p => p.Id == nextId && p.Enabled);
             if (next is not null && !_stopRequested && !_globalPaused && !IsCapturing && !_diagnosticCheck.Checked && !IsDisposed)
-                RunMacro(next);
+                RunMacro(next, nextGate);
         }
     }
 
-    private async Task RunWithCancellationAsync(MacroProfile profile)
+    private async Task RunWithCancellationAsync(MacroProfile profile, TriggerReleaseGate? releaseGate = null)
     {
         var current = CloneProfile(profile);
         for (var chainDepth = 0; chainDepth < MaxChainDepth; chainDepth++)
@@ -916,12 +919,16 @@ public sealed partial class MainForm : Form
             try
             {
                 var releaseDeadline = Environment.TickCount64 + 1500;
-                while (!_preview && AnyModifierHeld())
+                if (!_preview && releaseGate is { IsReleased: false })
+                    Log($"等待触发修饰键松开 · 系统修饰键 {PhysicalModifiers.Read()} · 监听仍有按键未松开", technical: true);
+                while ((!_preview && AnyModifierHeld()) || releaseGate is { IsReleased: false })
                 {
                     cts.Token.ThrowIfCancellationRequested();
-                    if (Environment.TickCount64 >= releaseDeadline) throw new InvalidOperationException("请先松开 Ctrl / Alt / Shift / Win，再运行方案");
+                    if (Environment.TickCount64 >= releaseDeadline) throw new InvalidOperationException("未确认快捷键已松开，本次未执行；请松开按键后重试");
                     await Task.Delay(10, cts.Token);
                 }
+                if (releaseGate is not null) Log("触发修饰键已松开，开始按顺序回放", technical: true);
+                releaseGate = null;
                 await _executor.RunAsync(current, cts.Token, message => PostToUi(() => Log(message, technical: true)));
                 completed = true;
                 SetStatus(UiText.Finished(current.Name)); Log(UiText.Finished(current.Name));
@@ -962,6 +969,7 @@ public sealed partial class MainForm : Form
         if (_activityMode == ActivityMode.Running)
         { _activityMode = ActivityMode.Stopping; _activityNote = "正在结束本次运行…"; RefreshActivityDisplay(); }
         _switchRequests.Clear();
+        _pendingReleaseGate = null;
         _executionCts?.Cancel();
         _executor.Cancel();
     }

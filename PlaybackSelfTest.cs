@@ -8,6 +8,43 @@ internal static class PlaybackSelfTest
         static MacroStep Key() => new() { Type = MacroStepType.KeyPress, KeyCode = (int)Keys.A, RecordedDelayMs = 0 };
         static bool Fails(Action action)
         { try { action(); return false; } catch (InvalidOperationException) { return true; } }
+        foreach (var remote in new[] { "vmware", "GameViewer" })
+        {
+            var source = new FakeDesktop { Remote = DesktopSwitcher.IsRemoteProcess(remote), Clipped = true };
+            var keys = new FakeInput(source);
+            var engine = new MacroExecutor(source, keys);
+            var altSentWhileCaptured = false;
+            keys.AfterInput = () =>
+            {
+                if (keys.Events.Last() == "key:164:False@11")
+                    altSentWhileCaptured = source.Clipped && source.Activations == 0 && source.Moves == 0;
+            };
+            engine.RunAsync(new() { SpeedMultiplier = 10, Steps =
+                [new() { Type = MacroStepType.KeyPress, KeyCode = (int)Keys.LMenu, RecordedDelayMs = 0 }, Click()] }).GetAwaiter().GetResult();
+            check(remote + " sends left Alt inside guest before any movement or focus handoff", altSentWhileCaptured &&
+                keys.Events.SequenceEqual(["key:164:True@11", "key:164:False@11", "mouse:2@22", "mouse:4@22"]));
+            check(remote + " retains guest focus after key-up even at fastest recorded playback", source.DelayHistory[0] == (100, (nint)11));
+        }
+        var delayedDesktop = new FakeDesktop { Remote = true };
+        var delayedSession = new PlaybackSession(delayedDesktop, null);
+        delayedSession.CompleteKeyboardAction(); delayedDesktop.TickCount += 150;
+        delayedSession.PlaceAsync(new(1500, 300), true, CancellationToken.None).GetAwaiter().GetResult();
+        check("existing recorded wait counts toward remote key handoff delay", delayedDesktop.DelayHistory[0] == (60, (nint)22));
+        delayedDesktop = new() { Remote = true }; delayedSession = new(delayedDesktop, null);
+        delayedSession.CompleteKeyboardAction();
+        delayedDesktop.AfterDelay = () => delayedDesktop.Foreground = 33;
+        check("focus stolen during key settling blocks host activation and movement",
+            Fails(() => delayedSession.PlaceAsync(new(1500, 300), true, CancellationToken.None).GetAwaiter().GetResult()) && delayedDesktop.Activations == 0 && delayedDesktop.Moves == 0);
+        delayedDesktop = new() { Remote = true }; delayedSession = new(delayedDesktop, null);
+        delayedSession.CompleteKeyboardAction();
+        using (var cancelHandoff = new CancellationTokenSource())
+        {
+            delayedDesktop.AfterDelay = cancelHandoff.Cancel;
+            var cancelled = false;
+            try { delayedSession.PlaceAsync(new(1500, 300), true, cancelHandoff.Token).GetAwaiter().GetResult(); }
+            catch (OperationCanceledException) { cancelled = true; }
+            check("cancellation after guest key-up cannot activate host or move cursor", cancelled && delayedDesktop.Activations == 0 && delayedDesktop.Moves == 0);
+        }
         var desktop = new FakeDesktop { Remote = true, Clipped = true, DelayedMoves = 1 };
         var input = new FakeInput(desktop);
         var executor = new MacroExecutor(desktop, input);
@@ -152,6 +189,8 @@ internal static class PlaybackSelfTest
         }
 
         check("right and left physical modifiers recognized", PhysicalModifiers.Read(k => k is Keys.RShiftKey or Keys.RControlKey or Keys.RMenu or Keys.RWin) == 15 && PhysicalModifiers.Read(k => k == Keys.LShiftKey) == 4);
+        var altPacket = WindowsPlaybackInput.KeyPacket((int)Keys.LMenu, 0x38, true).U.Ki;
+        check("left Alt uses unextended physical scan code", altPacket.WScan == 0x38 && altPacket.WVk == 0 && altPacket.DwFlags == 8);
         var packet = WindowsPlaybackInput.KeyPacket((int)Keys.A, 0x1E, true).U.Ki;
         check("ordinary key uses physical scan code with macro tag", packet.WVk == 0 && packet.WScan == 0x1E && packet.DwFlags == 8 && packet.DwExtraInfo == (nint)NativeMethods.MacroInputTag);
         packet = WindowsPlaybackInput.KeyPacket((int)Keys.Right, 0xE04D, false).U.Ki;
@@ -165,9 +204,12 @@ internal static class PlaybackSelfTest
     private sealed class FakeDesktop : IPlaybackDesktop
     {
         public nint Foreground { get; set; } = 11;
+        public long TickCount { get; set; }
         public Point Cursor { get; set; } = new(500, 300);
         public bool Remote, Clipped, DialogAllowed, ActivationWorks = true;
         public int DelayedMoves, Moves, Activations, Releases, Delays;
+        public List<(int Milliseconds, nint Foreground)> DelayHistory = [];
+        public Action? AfterDelay;
         public nint WindowAt(Point point) => point.X >= 1000 ? 22 : 11;
         public nint FindWindow(string title) => title == "missing" ? 0 : 22;
         public bool IsWindow(nint window) => window is 11 or 22;
@@ -178,7 +220,7 @@ internal static class PlaybackSelfTest
         public bool ReleaseClip() { Releases++; Clipped = false; return true; }
         public bool Activate(nint window) { Activations++; if (ActivationWorks) Foreground = window; return true; }
         public bool Move(Point point) { Moves++; Cursor = Moves <= DelayedMoves || OutsideClip(point) ? new(999, point.Y) : point; return true; }
-        public Task Delay(int ms, CancellationToken ct) { ct.ThrowIfCancellationRequested(); Delays++; return Task.CompletedTask; }
+        public Task Delay(int ms, CancellationToken ct) { ct.ThrowIfCancellationRequested(); Delays++; DelayHistory.Add((ms, Foreground)); TickCount += ms; AfterDelay?.Invoke(); return Task.CompletedTask; }
     }
 
     private sealed class FakeInput(FakeDesktop desktop) : IPlaybackInput

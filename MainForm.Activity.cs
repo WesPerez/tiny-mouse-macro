@@ -2,7 +2,8 @@ namespace TinyMouseMacro;
 
 public sealed partial class MainForm
 {
-    private readonly Label _activityTitle = new(), _activityDetail = new(), _activityBadge = new();
+    private readonly Label _activityTitle = new(), _activityDetail = new();
+    private readonly PillLabel _activityBadge = new();
     private readonly System.Windows.Forms.Timer _activityTimer = new() { Interval = 250 };
     private readonly System.Diagnostics.Stopwatch _activityClock = new();
     private ActivityMode _activityMode;
@@ -15,7 +16,7 @@ public sealed partial class MainForm
 
     private Control BuildActivityBar()
     {
-        var bar = Grid(3, 1, 12);
+        var bar = Grid(3, 1, 12, rounded: true);
         bar.ColumnStyles.Add(new(SizeType.Absolute, 94));
         bar.ColumnStyles.Add(new(SizeType.Percent, 100));
         bar.ColumnStyles.Add(new(SizeType.Absolute, 292));

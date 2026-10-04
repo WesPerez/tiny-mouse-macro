@@ -210,15 +210,15 @@ public sealed class MacroExecutor
                 await DelayMs(Math.Max(0, step.DelayMs), speedMultiplier, ct);
                 break;
             case MacroStepType.KeyPress:
-                session.VerifyFocus(); EnsureModifiersReleased();
+                session.BeginKeyboardAction(step.KeyCode); EnsureModifiersReleased();
                 await SendKeyPress(step.KeyCode, speedMultiplier, ct);
-                session.ObserveActionResult();
+                session.CompleteKeyboardAction();
                 break;
             case MacroStepType.KeyCombo:
-                session.VerifyFocus(); EnsureModifiersReleased();
+                session.BeginKeyboardAction(step.KeyCode); EnsureModifiersReleased();
                 await SendKeyCombo(step.KeyModifiers, step.KeyCode, speedMultiplier, ct);
                 if (IsWindowSwitch(step)) session.AllowNextForeground();
-                else session.ObserveActionResult();
+                else session.CompleteKeyboardAction();
                 break;
             case MacroStepType.TypeText:
                 foreach (var c in step.TextToType ?? string.Empty)
@@ -228,6 +228,7 @@ public sealed class MacroExecutor
                     _input.Character(c);
                     await DelayMs(15, speedMultiplier, ct);
                 }
+                if (!string.IsNullOrEmpty(step.TextToType)) session.CompleteKeyboardAction();
                 break;
             case MacroStepType.MouseWheel:
                 session.VerifyFocus(); EnsureModifiersReleased();
