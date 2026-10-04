@@ -31,15 +31,16 @@ public sealed partial class MainForm
             RepeatCount = profile.RepeatCount, RepeatIntervalMs = profile.RepeatIntervalMs,
             SpeedMultiplier = profile.SpeedMultiplier, TargetWindowTitle = profile.TargetWindowTitle,
             ReleaseRemoteInput = profile.ReleaseRemoteInput,
+            TriggerType = profile.TriggerType, TriggerKey = profile.TriggerKey, TriggerModifiers = profile.TriggerModifiers,
+            TriggerMouseButton = profile.TriggerMouseButton,
             Enabled = profile.Enabled, Steps = profile.Steps.Select(CloneStep).ToList() };
     }
-    private static bool AnyModifierHeld() => new[] { Keys.ControlKey, Keys.Menu, Keys.ShiftKey, Keys.LWin, Keys.RWin }
-        .Any(key => (NativeMethods.GetAsyncKeyState((int)key) & 0x8000) != 0);
+    private static bool AnyModifierHeld() => PhysicalModifiers.Read() != 0;
     private void SetCaptureEditing(bool enabled)
     {
         foreach (var c in new Control[] { _nameBox, _searchBox, _profileList, _triggerTypeBox, _hotkeyBox,
             _hookKeyBox, _mouseButtonBox, _repeatCountBox, _repeatIntervalBox, _speedBox, _scheduleIntervalBox,
-            _enabledCheckBox, _targetWindowBox, _recordKeyboardCheck, _releaseRemoteCheck }) c.Enabled = enabled;
+            _enabledCheckBox, _targetWindowBox, _recordKeyboardCheck }) c.Enabled = enabled;
     }
     protected override void Dispose(bool disposing)
     {
@@ -61,7 +62,7 @@ public sealed partial class MainForm
             if (!File.Exists(PreferencesPath)) return;
             var prefs = JsonSerializer.Deserialize<Preferences>(File.ReadAllText(PreferencesPath));
             if (prefs is null) return;
-            _isBinding = true; _rawInputCheck.Checked = prefs.RawInput; _externalTriggerCheck.Checked = prefs.ExternalLaunchers; _isBinding = false;
+            _isBinding = true; _externalTriggerCheck.Checked = prefs.ExternalLaunchers; _isBinding = false;
             if (Theme.IsDark != prefs.Dark) ToggleTheme();
         }
         catch { _isBinding = false; }
@@ -69,7 +70,7 @@ public sealed partial class MainForm
     private void SavePreferences()
     {
         if (_preview) return;
-        try { File.WriteAllText(PreferencesPath, JsonSerializer.Serialize(new Preferences(Theme.IsDark, _rawInputCheck.Checked, _externalTriggerCheck.Checked))); }
+        try { File.WriteAllText(PreferencesPath, JsonSerializer.Serialize(new Preferences(Theme.IsDark, true, _externalTriggerCheck.Checked))); }
         catch (Exception ex) { SetStatus("偏好保存失败：" + ex.Message); }
     }
     private sealed record Preferences(bool Dark, bool RawInput, bool ExternalLaunchers = false);
@@ -89,7 +90,7 @@ public sealed partial class MainForm
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
         if (!Path.GetFileNameWithoutExtension(dialog.FileName).EndsWith("." + p.Id, StringComparison.OrdinalIgnoreCase))
         { SetStatus("请保留启动器文件名末尾的方案 ID，以便识别目标方案。"); return; }
-        try { File.Copy(source, dialog.FileName, true); SetStatus("已生成。在 iCUE 中选择“启动应用”，指向此 exe，并勾选允许 iCUE 启动切屏方案。"); }
+        try { File.Copy(source, dialog.FileName, true); SetStatus("已生成。可将此 exe 分配给 iCUE 的“启动应用”；使用时开启高级工具中的“允许外部启动器触发切屏”。"); }
         catch (Exception ex) { SetStatus(ex.Message); }
     }
 }

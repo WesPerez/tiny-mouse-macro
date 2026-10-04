@@ -20,9 +20,9 @@ internal static class SelfTest
             var old = JsonSerializer.Deserialize<MacroProfile>("{\"Name\":\"上\",\"Hotkey\":\"Shift+Z\",\"Steps\":[{\"Type\":1,\"X\":2272,\"Y\":-457}]}")!;
             MacroStore.NormalizeProfile(old);
             Check("legacy defaults and timing preserved", old.Enabled && old.RepeatCount == 1 && old.Steps[0].RecordedDelayMs is null && old.Steps[0].Y == -457);
-            Check("legacy remote release remains opt-in", !old.ReleaseRemoteInput && !DesktopSwitcher.IsSwitchProfile(old));
+            Check("legacy remote field preserved without controlling playback", !old.ReleaseRemoteInput);
             old.ReleaseRemoteInput = true;
-            Check("one-point switch policy", DesktopSwitcher.IsSwitchProfile(old) && ExternalTrigger.IsEligible(old));
+            Check("one-point external switch policy", ExternalTrigger.IsEligible(old));
             Check("external launch cannot run arbitrary programs", !ExternalTrigger.IsEligible(new() { Steps = [new() { Type = MacroStepType.RunProgram }] }));
             Check("external launch cannot start loops", !ExternalTrigger.IsEligible(new() { RepeatCount = 0, Steps = [new() { Type = MacroStepType.Move }] }));
             var state = new KeyEventState();
@@ -50,13 +50,7 @@ internal static class SelfTest
             reconnect.ObserveCapture(false);
             Check("same window recapture can recover", reconnect.ObserveCapture(true) && reconnect.Request());
 
-            var switchProfile = new MacroProfile { Steps = [new() { Type = MacroStepType.LeftClick, X = 1500, Y = 300 }] };
-            var vmBounds = new Rectangle(0, 0, 1000, 800);
-            Check("VMware cross-window compatibility only", DesktopSwitcher.CanAssistVmware(switchProfile, true, vmBounds) && !DesktopSwitcher.CanAssistVmware(switchProfile, false, vmBounds));
-            switchProfile.Steps[0].X = 400;
-            Check("guest internal click unchanged", !DesktopSwitcher.CanAssistVmware(switchProfile, true, vmBounds));
-            switchProfile.Steps[0].X = 1500; switchProfile.Steps[0].RecordedDelayMs = 10;
-            Check("recorded step excluded from automatic switching", !DesktopSwitcher.CanAssistVmware(switchProfile, true, vmBounds));
+            PlaybackSelfTest.Run(Check);
             var targetPoint = new Point(1500, 300); var moves = 0; var reads = 0;
             PointerPlacement.MoveUntilStableAsync(targetPoint, () => { moves++; return true; },
                 () => { reads++; return moves < 2 ? new Point(999, 300) : targetPoint; },
@@ -86,6 +80,45 @@ internal static class SelfTest
                 Check("cancelled switch does not move", blocked && moves == 0);
             }
             var activity = Path.Combine(output, "activity-test.log");
+            nint focused = 11; var focusRequests = 0; var focusSamples = 0;
+            WindowActivation.EnsureForegroundAsync(11, 22, () => focused,
+                () => { focusRequests++; return true; }, () => true,
+                (_, _) => { focusSamples++; if (focusSamples == 3) focused = 22; return Task.CompletedTask; },
+                CancellationToken.None).GetAwaiter().GetResult();
+            Check("focus transfer waits for actual foreground not API success", focusRequests == 3 && focusSamples == 4);
+            focused = 11; focusRequests = 0; blocked = false;
+            try { WindowActivation.EnsureForegroundAsync(11, 22, () => focused,
+                () => { focusRequests++; return true; }, () => true, (_, _) => Task.CompletedTask,
+                CancellationToken.None).GetAwaiter().GetResult(); }
+            catch (InvalidOperationException) { blocked = true; }
+            Check("unchanged VMware focus aborts before any click", blocked && focusRequests == 6);
+            focused = 11; focusRequests = 0; focusSamples = 0;
+            WindowActivation.EnsureForegroundAsync(11, 22, () => focused,
+                () => { focusRequests++; focused = 22; return true; }, () => true,
+                (_, _) => { focusSamples++; if (focusSamples == 2) focused = 11; return Task.CompletedTask; },
+                CancellationToken.None).GetAwaiter().GetResult();
+            Check("transient target focus must stabilize", focusRequests == 2 && focusSamples == 4);
+            focused = 11; focusRequests = 0; blocked = false;
+            try { WindowActivation.EnsureForegroundAsync(11, 22, () => focused,
+                () => { focusRequests++; return true; }, () => true,
+                (_, _) => { focused = 33; return Task.CompletedTask; }, CancellationToken.None).GetAwaiter().GetResult(); }
+            catch (InvalidOperationException) { blocked = true; }
+            Check("other foreground cancels instead of fighting user", blocked && focusRequests == 1);
+            focused = 11; focusRequests = 0; blocked = false;
+            try { WindowActivation.EnsureForegroundAsync(11, 22, () => focused,
+                () => { focusRequests++; return true; }, () => false, (_, _) => Task.CompletedTask,
+                CancellationToken.None).GetAwaiter().GetResult(); }
+            catch (InvalidOperationException) { blocked = true; }
+            Check("changed target aborts before requesting focus", blocked && focusRequests == 0);
+            using (var cancelledFocus = new CancellationTokenSource())
+            {
+                cancelledFocus.Cancel(); blocked = false;
+                try { WindowActivation.EnsureForegroundAsync(11, 22, () => focused,
+                    () => { focusRequests++; return true; }, () => true, (_, _) => Task.CompletedTask,
+                    cancelledFocus.Token).GetAwaiter().GetResult(); }
+                catch (OperationCanceledException) { blocked = true; }
+                Check("cancelled focus handoff does not activate", blocked && focusRequests == 0);
+            }
             File.WriteAllText(activity, new string('x', ActivityLog.MaximumBytes));
             ActivityLog.Append(activity, "test\nentry");
             Check("activity log rotates with one backup", File.Exists(activity + ".previous") && new FileInfo(activity).Length < 500 && File.ReadAllText(activity).Contains("test entry"));
@@ -201,6 +234,10 @@ public sealed partial class MainForm
         check("disabled launcher rejects queued message", NativeMethods.SendMessageW(Handle, (int)message, 0, 0) == 0);
         _externalTrigger.Dispose(); _externalTrigger = null;
         _diagnosticCheck.Checked = false;
+        _workspaceTabs.SelectedIndex = 2;
+        _diagnosticCheck.Checked = true;
+        _workspaceTabs.SelectedIndex = 0;
+        check("leaving diagnostics restores execution", !_diagnosticCheck.Checked);
     }
     internal void InitializePreview(List<MacroProfile> profiles, Size size)
     {
@@ -209,7 +246,7 @@ public sealed partial class MainForm
         _profiles = profiles; _profilesSource.DataSource = profiles; _profileList.DataSource = _profilesSource;
         _profileList.DisplayMember = nameof(MacroProfile.DisplayText); _profileList.SelectedIndex = 0;
         BindSelectedProfile(); UpdateSummary();
-        _backendLabel.Text = "系统热键 5 · 键盘监听 就绪 · 后台输入 关闭";
+        _backendLabel.Text = "系统热键 5 · 键盘监听 就绪 · 后台输入 已开启";
         _statusLabel.Text = "就绪 · 3 个方案可用 · Ctrl+Alt+F10 停止"; _saveState.Text = "更改自动保存";
         SelfTest.CreateHandles(this); PerformAutoScale(); PerformLayout();
     }

@@ -218,6 +218,7 @@ public sealed partial class MainForm : Form
     {
         if (!_reallyClosing && e.CloseReason == CloseReason.UserClosing && !_preview)
         {
+            _diagnosticCheck.Checked = false;
             e.Cancel = true;
             StopAll();
             if (!SaveAll(force: true)) return;
@@ -335,7 +336,6 @@ public sealed partial class MainForm : Form
             _repeatCountBox.Value = Math.Min(_repeatCountBox.Maximum, Math.Max(_repeatCountBox.Minimum, profile?.RepeatCount ?? 1));
             _repeatIntervalBox.Value = Math.Min(_repeatIntervalBox.Maximum, Math.Max(_repeatIntervalBox.Minimum, profile?.RepeatIntervalMs ?? 0));
             _enabledCheckBox.Checked = profile?.Enabled ?? true;
-            _releaseRemoteCheck.Checked = profile?.ReleaseRemoteInput ?? false;
             _scheduleIntervalBox.Value = Math.Min(_scheduleIntervalBox.Maximum, Math.Max(_scheduleIntervalBox.Minimum, profile?.ScheduleIntervalMinutes ?? 0));
             _targetWindowBox.Text = profile?.TargetWindowTitle ?? string.Empty;
             _speedBox.Value = Math.Min(_speedBox.Maximum, Math.Max(_speedBox.Minimum, (decimal)(profile?.SpeedMultiplier ?? 1.0)));
@@ -834,7 +834,7 @@ public sealed partial class MainForm : Form
     {
         ConfigureExternalTrigger();
         if (_hotkeys is null || IsCapturing || _hotkeyBox.Focused || _hookKeyBox.Focused) return;
-        var errors = _hotkeys.RegisterAll(_profiles, _rawInputCheck.Checked, force);
+        var errors = _hotkeys.RegisterAll(_profiles, force: force);
         _backendLabel.Text = _hotkeys.BackendStatus;
         foreach (var error in errors) Log(error);
         SetStatus(errors.Count == 0 ? $"就绪 · {_hotkeys.RegisteredCount} 个方案可用 · Ctrl+Alt+F10 停止" : string.Join(" | ", errors));
@@ -877,11 +877,7 @@ public sealed partial class MainForm : Form
                     if (Environment.TickCount64 >= releaseDeadline) throw new InvalidOperationException("请先松开 Ctrl / Alt / Shift / Win，再运行方案");
                     await Task.Delay(10, cts.Token);
                 }
-                if (!await DesktopSwitcher.TryVmwareMoveAsync(current, _rawInputCheck.Checked, cts.Token, Log))
-                {
-                    await DesktopSwitcher.PrepareAsync(current, cts.Token, Log);
-                    await _executor.RunAsync(current, cts.Token);
-                }
+                await _executor.RunAsync(current, cts.Token, message => PostToUi(() => Log(message)));
                 completed = true;
                 PostToUi(() =>
                 {

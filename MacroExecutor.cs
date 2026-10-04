@@ -13,6 +13,10 @@ public sealed class MacroExecutor
     private bool _isRunning;
     private CancellationTokenSource? _loopCts;
     private string? _pendingChainMacroId;
+    private readonly IPlaybackDesktop _desktop;
+    private readonly IPlaybackInput _input;
+    public MacroExecutor() : this(new WindowsPlaybackDesktop(), new WindowsPlaybackInput()) { }
+    internal MacroExecutor(IPlaybackDesktop desktop, IPlaybackInput input) { _desktop = desktop; _input = input; }
 
     public bool IsRunning
     {
@@ -42,7 +46,7 @@ public sealed class MacroExecutor
         }
     }
 
-    public Task RunAsync(MacroProfile profile, CancellationToken cancellationToken = default)
+    public Task RunAsync(MacroProfile profile, CancellationToken cancellationToken = default, Action<string>? log = null)
     {
         lock (_lock)
         {
@@ -63,7 +67,7 @@ public sealed class MacroExecutor
         {
             try
             {
-                await RunCoreAsync(profile, linkedToken);
+                await RunCoreAsync(profile, linkedToken, log);
             }
             finally
             {
@@ -77,7 +81,7 @@ public sealed class MacroExecutor
         });
     }
 
-    private async Task RunCoreAsync(MacroProfile profile, CancellationToken ct)
+    private async Task RunCoreAsync(MacroProfile profile, CancellationToken ct, Action<string>? log)
     {
         var repeatCount = profile.RepeatCount;
         var repeatIntervalMs = Math.Max(0, profile.RepeatIntervalMs);
@@ -86,12 +90,13 @@ public sealed class MacroExecutor
         var executedSteps = 0;
         var speedMultiplier = Math.Max(0.1, Math.Min(10.0, profile.SpeedMultiplier));
         var targetWindowTitle = profile.TargetWindowTitle?.Trim();
+        var session = new PlaybackSession(_desktop, log);
 
         var steps = profile.Steps.ToArray();
         while (isInfinite || iteration < repeatCount)
         {
             ct.ThrowIfCancellationRequested();
-            FocusTargetWindow(targetWindowTitle);
+            await session.FocusNamedWindowAsync(targetWindowTitle, ct);
 
             var timing = Stopwatch.StartNew();
             double targetTimeMs = 0;
@@ -114,7 +119,7 @@ public sealed class MacroExecutor
                     if (remaining > 0) await Task.Delay(TimeSpan.FromMilliseconds(remaining), ct);
                 }
                 previousRecorded = step.RecordedDelayMs.HasValue;
-                var result = await ExecuteStepAsync(step, speedMultiplier, ct);
+                var result = await ExecuteStepAsync(step, speedMultiplier, session, ct);
                 if (result.JumpToIndex.HasValue)
                 {
                     var jumpIndex = result.JumpToIndex.Value;
@@ -135,28 +140,19 @@ public sealed class MacroExecutor
         }
     }
 
-    private static void FocusTargetWindow(string? targetWindowTitle)
+    private async Task<StepResult> ExecuteStepAsync(MacroStep step, double speedMultiplier, PlaybackSession session, CancellationToken ct)
     {
-        if (string.IsNullOrEmpty(targetWindowTitle)) return;
-
-        var hwnd = NativeMethods.FindWindowW(null, targetWindowTitle);
-        if (hwnd != 0)
-        {
-            NativeMethods.SetForegroundWindow(hwnd);
-            Thread.Sleep(50);
-        }
-    }
-
-    private async Task<StepResult> ExecuteStepAsync(MacroStep step, double speedMultiplier, CancellationToken ct)
-    {
+        if (step.Type is MacroStepType.Move or MacroStepType.MoveRelative or MacroStepType.LeftClick or
+            MacroStepType.RightClick or MacroStepType.MiddleClick or MacroStepType.DoubleClick or MacroStepType.Drag)
+            EnsureModifiersReleased();
         switch (step.Type)
         {
             case MacroStepType.Move:
-                NativeMethods.SetCursorPos(step.X, step.Y);
+                await session.PlaceAsync(new(step.X, step.Y), false, ct);
                 break;
             case MacroStepType.MoveRelative:
-                var currentPos = Cursor.Position;
-                NativeMethods.SetCursorPos(currentPos.X + step.X, currentPos.Y + step.Y);
+                var currentPos = _desktop.Cursor;
+                await session.PlaceAsync(new(checked(currentPos.X + step.X), checked(currentPos.Y + step.Y)), false, ct);
                 break;
             case MacroStepType.WaitPixel:
                 await WaitForPixelAsync(step.X, step.Y, step.PixelColor, step.PixelTolerance, step.PixelTimeoutMs, ct);
@@ -164,7 +160,7 @@ public sealed class MacroExecutor
             case MacroStepType.FindPixel:
                 var found = await FindPixelInRegionAsync(step.X, step.Y, step.SearchWidth, step.SearchHeight, step.PixelColor, step.PixelTolerance, step.PixelTimeoutMs, ct);
                 if (found.HasValue)
-                    NativeMethods.SetCursorPos(found.Value.x, found.Value.y);
+                    await session.PlaceAsync(new(found.Value.x, found.Value.y), false, ct);
                 break;
             case MacroStepType.Screenshot:
                 CaptureScreenshot(step.X, step.Y, step.SearchWidth, step.SearchHeight);
@@ -180,6 +176,7 @@ public sealed class MacroExecutor
                 break;
             case MacroStepType.RunProgram:
                 RunProgram(step.RunProgramPath, step.RunProgramArgs);
+                session.AllowNextForeground();
                 break;
             case MacroStepType.PlaySound:
                 PlaySound(step.SoundFilePath);
@@ -188,51 +185,66 @@ public sealed class MacroExecutor
                 RequestChainMacro(step.ChainMacroId);
                 break;
             case MacroStepType.LeftClick:
-                await ClickAsync(step.X, step.Y, NativeMethods.MouseEventFLeftDown, NativeMethods.MouseEventFLeftUp, speedMultiplier, ct);
+                await ClickAsync(step.X, step.Y, NativeMethods.MouseEventFLeftDown, NativeMethods.MouseEventFLeftUp, speedMultiplier, session, ct);
                 break;
             case MacroStepType.RightClick:
-                await ClickAsync(step.X, step.Y, NativeMethods.MouseEventFRightDown, NativeMethods.MouseEventFRightUp, speedMultiplier, ct);
+                await ClickAsync(step.X, step.Y, NativeMethods.MouseEventFRightDown, NativeMethods.MouseEventFRightUp, speedMultiplier, session, ct);
                 break;
             case MacroStepType.DoubleClick:
-                await ClickAsync(step.X, step.Y, NativeMethods.MouseEventFLeftDown, NativeMethods.MouseEventFLeftUp, speedMultiplier, ct);
+                await ClickAsync(step.X, step.Y, NativeMethods.MouseEventFLeftDown, NativeMethods.MouseEventFLeftUp, speedMultiplier, session, ct);
                 await DelayMs(50, speedMultiplier, ct);
-                await ClickAsync(step.X, step.Y, NativeMethods.MouseEventFLeftDown, NativeMethods.MouseEventFLeftUp, speedMultiplier, ct);
+                // No second placement/focus activation between the two intentional clicks.
+                session.VerifyPoint(new(step.X, step.Y));
+                EnsureModifiersReleased();
+                await ClickAtCursorAsync(NativeMethods.MouseEventFLeftDown, NativeMethods.MouseEventFLeftUp, speedMultiplier, ct);
+                session.ObserveActionResult();
                 break;
             case MacroStepType.MiddleClick:
-                await ClickAsync(step.X, step.Y, NativeMethods.MouseEventFMiddleDown, NativeMethods.MouseEventFMiddleUp, speedMultiplier, ct);
+                await ClickAsync(step.X, step.Y, NativeMethods.MouseEventFMiddleDown, NativeMethods.MouseEventFMiddleUp, speedMultiplier, session, ct);
                 break;
             case MacroStepType.Delay:
                 await DelayMs(Math.Max(0, step.DelayMs), speedMultiplier, ct);
                 break;
             case MacroStepType.KeyPress:
-                SendKeyPress(step.KeyCode);
-                await DelayMs(35, speedMultiplier, ct);
+                session.VerifyFocus(); EnsureModifiersReleased();
+                await SendKeyPress(step.KeyCode, speedMultiplier, ct);
+                session.ObserveActionResult();
                 break;
             case MacroStepType.KeyCombo:
+                session.VerifyFocus(); EnsureModifiersReleased();
                 await SendKeyCombo(step.KeyModifiers, step.KeyCode, speedMultiplier, ct);
+                if (IsWindowSwitch(step)) session.AllowNextForeground();
+                else session.ObserveActionResult();
                 break;
             case MacroStepType.TypeText:
                 foreach (var c in step.TextToType ?? string.Empty)
                 {
                     ct.ThrowIfCancellationRequested();
-                    SendChar(c);
+                    session.VerifyFocus(); EnsureModifiersReleased();
+                    _input.Character(c);
                     await DelayMs(15, speedMultiplier, ct);
                 }
                 break;
             case MacroStepType.MouseWheel:
-                NativeMethods.mouse_event(NativeMethods.MouseEventFWheel, 0, 0, unchecked((uint)step.WheelDelta), NativeMethods.MacroInputTag);
+                session.VerifyFocus(); EnsureModifiersReleased();
+                _input.Mouse(NativeMethods.MouseEventFWheel, unchecked((uint)step.WheelDelta));
                 break;
             case MacroStepType.Drag:
-                NativeMethods.SetCursorPos(step.X, step.Y);
-                await DelayMs(35, speedMultiplier, ct);
-                NativeMethods.mouse_event(NativeMethods.MouseEventFLeftDown, 0, 0, 0, NativeMethods.MacroInputTag);
+                await session.PlaceAsync(new(step.X, step.Y), true, ct);
+                EnsureModifiersReleased();
+                session.VerifyPoint(new(step.X, step.Y));
+                _input.Mouse(NativeMethods.MouseEventFLeftDown);
                 try
                 {
                     await DelayMs(35, speedMultiplier, ct);
-                    NativeMethods.SetCursorPos(step.DragEndX, step.DragEndY);
+                    // Dragging across windows must keep the original drag owner focused.
+                    await PointerPlacement.MoveUntilStableAsync(new(step.DragEndX, step.DragEndY),
+                        () => _desktop.Move(new(step.DragEndX, step.DragEndY)), () => _desktop.Cursor,
+                        () => { session.VerifyFocus(); return true; }, _desktop.Delay, ct);
                     await DelayMs(35, speedMultiplier, ct);
                 }
-                finally { NativeMethods.mouse_event(NativeMethods.MouseEventFLeftUp, 0, 0, 0, NativeMethods.MacroInputTag); }
+                finally { _input.Mouse(NativeMethods.MouseEventFLeftUp); }
+                session.ObserveActionResult();
                 break;
         }
 
@@ -251,13 +263,21 @@ public sealed class MacroExecutor
         ChainMacroRequested?.Invoke(chainMacroId);
     }
 
-    private static async Task ClickAsync(int x, int y, uint downFlag, uint upFlag, double speedMultiplier, CancellationToken ct)
+    private async Task ClickAsync(int x, int y, uint downFlag, uint upFlag, double speedMultiplier, PlaybackSession session, CancellationToken ct)
     {
-        NativeMethods.SetCursorPos(x, y);
-        await DelayMs(35, speedMultiplier, ct);
-        NativeMethods.mouse_event(downFlag, 0, 0, 0, NativeMethods.MacroInputTag);
+        await session.PlaceAsync(new(x, y), true, ct);
+        EnsureModifiersReleased();
+        session.VerifyPoint(new(x, y));
+        await ClickAtCursorAsync(downFlag, upFlag, speedMultiplier, ct);
+        session.ObserveActionResult();
+    }
+
+    private async Task ClickAtCursorAsync(uint downFlag, uint upFlag, double speedMultiplier, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        _input.Mouse(downFlag);
         try { await DelayMs(35, speedMultiplier, ct); }
-        finally { NativeMethods.mouse_event(upFlag, 0, 0, 0, NativeMethods.MacroInputTag); }
+        finally { _input.Mouse(upFlag); }
     }
 
     private static async Task DelayMs(int ms, double speedMultiplier, CancellationToken ct)
@@ -276,78 +296,48 @@ public sealed class MacroExecutor
         return Random.Shared.Next(min, max + 1);
     }
 
-    private static void SendKeyPress(int keyCode)
+    private void EnsureModifiersReleased()
     {
-        if (keyCode is <= 0 or > byte.MaxValue) return;
-
-        var key = (byte)keyCode;
-        NativeMethods.keybd_event(key, 0, 0, NativeMethods.MacroInputTag);
-        NativeMethods.keybd_event(key, 0, NativeMethods.KeyeventfKeyup, NativeMethods.MacroInputTag);
+        if (_input.Modifiers != 0)
+            throw new InvalidOperationException("物理修饰键仍被按住，已停止操作；请松开 Ctrl / Alt / Shift / Win。");
     }
 
-    private static async Task SendKeyCombo(uint modifiers, int keyCode, double speedMultiplier, CancellationToken ct)
+    internal static bool IsWindowSwitch(MacroStep step) =>
+        (step.KeyModifiers & 1) != 0 && step.KeyCode is (int)Keys.Tab or (int)Keys.Escape ||
+        (step.KeyModifiers & 8) != 0 && step.KeyCode is (int)Keys.Tab or (int)Keys.D or (int)Keys.M;
+
+    private async Task SendKeyPress(int keyCode, double speedMultiplier, CancellationToken ct)
     {
         if (keyCode is <= 0 or > byte.MaxValue) return;
+        ct.ThrowIfCancellationRequested();
+        _input.Key(keyCode, true);
+        try { await DelayMs(35, speedMultiplier, ct); }
+        finally { _input.Key(keyCode, false); }
+    }
 
-        var key = (byte)keyCode;
-        var held = new List<byte>();
+    private async Task SendKeyCombo(uint modifiers, int keyCode, double speedMultiplier, CancellationToken ct)
+    {
+        if (keyCode is <= 0 or > byte.MaxValue) return;
+        var held = new List<int>();
         try
         {
-            foreach (var (mask, modifier) in new[] { (2u, Keys.ControlKey), (1u, Keys.Menu), (4u, Keys.ShiftKey), (8u, Keys.LWin) })
+            foreach (var (mask, modifier) in new[] { (2u, Keys.LControlKey), (1u, Keys.LMenu), (4u, Keys.LShiftKey), (8u, Keys.LWin) })
             {
-                if ((modifiers & mask) == 0 || (NativeMethods.GetAsyncKeyState((int)modifier) & 0x8000) != 0 ||
-                    (modifier == Keys.LWin && (NativeMethods.GetAsyncKeyState((int)Keys.RWin) & 0x8000) != 0)) continue;
-                NativeMethods.keybd_event((byte)modifier, 0, 0, NativeMethods.MacroInputTag);
-                held.Add((byte)modifier);
+                ct.ThrowIfCancellationRequested();
+                if ((modifiers & mask) == 0) continue;
+                _input.Key((int)modifier, true);
+                held.Add((int)modifier);
             }
-            NativeMethods.keybd_event(key, 0, 0, NativeMethods.MacroInputTag);
-            try { await DelayMs(35, speedMultiplier, ct); }
-            finally { NativeMethods.keybd_event(key, 0, NativeMethods.KeyeventfKeyup, NativeMethods.MacroInputTag); }
+            await SendKeyPress(keyCode, speedMultiplier, ct);
         }
         finally
         {
+            // Try releasing every key even if Windows rejects one release.
+            Exception? releaseError = null;
             for (var i = held.Count - 1; i >= 0; i--)
-                NativeMethods.keybd_event(held[i], 0, NativeMethods.KeyeventfKeyup, NativeMethods.MacroInputTag);
+                try { _input.Key(held[i], false); } catch (Exception ex) { releaseError ??= ex; }
+            if (releaseError is not null) throw releaseError;
         }
-    }
-
-    private static void SendChar(char c)
-    {
-        var inputs = new NativeMethods.Input[2];
-
-        inputs[0] = new NativeMethods.Input
-        {
-            Type = NativeMethods.InputKeyboard,
-            U = new NativeMethods.InputUnion
-            {
-                Ki = new NativeMethods.Keybdinput
-                {
-                    WVk = 0,
-                    WScan = c,
-                    DwFlags = NativeMethods.KeyeventfUnicode,
-                    Time = 0,
-                    DwExtraInfo = (nint)NativeMethods.MacroInputTag
-                }
-            }
-        };
-
-        inputs[1] = new NativeMethods.Input
-        {
-            Type = NativeMethods.InputKeyboard,
-            U = new NativeMethods.InputUnion
-            {
-                Ki = new NativeMethods.Keybdinput
-                {
-                    WVk = 0,
-                    WScan = c,
-                    DwFlags = NativeMethods.KeyeventfUnicode | NativeMethods.KeyeventfKeyup,
-                    Time = 0,
-                    DwExtraInfo = (nint)NativeMethods.MacroInputTag
-                }
-            }
-        };
-
-        NativeMethods.SendInput(2, inputs, Marshal.SizeOf<NativeMethods.Input>());
     }
 
     private static async Task WaitForPixelAsync(int x, int y, int targetColor, int tolerance, int timeoutMs, CancellationToken ct)

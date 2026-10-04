@@ -3,6 +3,14 @@ param([string]$TargetExe)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+Add-Type -AssemblyName Microsoft.VisualBasic
+
+function Send-FileToRecycleBin([string]$Path) {
+    [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($Path,
+        [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs,
+        [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin,
+        [Microsoft.VisualBasic.FileIO.UICancelOption]::ThrowException)
+}
 
 # Preserve the installed path used by startup. Never execute a registry command line.
 if (-not $TargetExe) {
@@ -66,7 +74,7 @@ function Install-FileAtomically([string]$Source, [string]$Destination) {
         if (Test-Path -LiteralPath $Destination) { [IO.File]::Replace($incoming, $Destination, [NullString]::Value) }
         else { [IO.File]::Move($incoming, $Destination) }
     }
-    finally { if (Test-Path -LiteralPath $incoming) { Remove-Item -LiteralPath $incoming -Force } }
+    finally { if (Test-Path -LiteralPath $incoming) { Send-FileToRecycleBin $incoming } }
 }
 Push-Location $PSScriptRoot
 try {
@@ -126,7 +134,7 @@ try {
             $file = $replaced[$index]
             try {
                 if ($file.Backup) { Install-FileAtomically $file.Backup $file.Target }
-                elseif (Test-Path -LiteralPath $file.Target) { Remove-Item -LiteralPath $file.Target -Force }
+                elseif (Test-Path -LiteralPath $file.Target) { Send-FileToRecycleBin $file.Target }
             }
             catch { $keepRecovery = $true; Write-Warning "Restore failed for $($file.Target). Recovery files retained at $stage" }
         }
@@ -138,11 +146,14 @@ try {
 }
 finally {
     Pop-Location
-    # Delete only this invocation's verified temporary directory, never the install directory.
+    # Recycle only this invocation's verified temporary directory, never the install directory.
     $resolvedStage = [IO.Path]::GetFullPath($stage)
     if ($keepRecovery) { Write-Warning "Deployment did not complete. Recovery files retained at $resolvedStage" }
     if (-not $keepRecovery -and (Test-Path -LiteralPath $resolvedStage)) {
         if ((Split-Path -Parent $resolvedStage) -ine $temporaryRoot -or (Split-Path -Leaf $resolvedStage) -notmatch '^TinyMouseMacro-build-[a-f0-9]{32}$') { throw 'Refusing cleanup outside this build temporary directory.' }
-        Remove-Item -LiteralPath $resolvedStage -Recurse -Force
+        [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($resolvedStage,
+            [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs,
+            [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin,
+            [Microsoft.VisualBasic.FileIO.UICancelOption]::ThrowException)
     }
 }

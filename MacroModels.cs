@@ -20,7 +20,7 @@ public sealed class MacroProfile
     public string TargetWindowTitle { get; set; } = string.Empty;
     public double SpeedMultiplier { get; set; } = 1.0;
     public int ScheduleIntervalMinutes { get; set; }
-    // Missing in older files: preserve their original click/move behavior.
+    // Retained for JSON compatibility only. Playback now handles focus/capture automatically.
     public bool ReleaseRemoteInput { get; set; }
 
     [JsonIgnore]

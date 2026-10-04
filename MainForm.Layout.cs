@@ -4,8 +4,8 @@ public sealed partial class MainForm
 {
     private readonly Label _saveState = new(), _stepSummary = new(), _backendLabel = new(), _lastSignal = new();
     private readonly Button _recordButton = new(), _pauseButton = new();
-    private readonly CheckBox _rawInputCheck = new(), _diagnosticCheck = new(), _recordKeyboardCheck = new();
-    private readonly CheckBox _releaseRemoteCheck = new(), _externalTriggerCheck = new();
+    private readonly CheckBox _diagnosticCheck = new(), _recordKeyboardCheck = new();
+    private readonly CheckBox _externalTriggerCheck = new();
     private ExternalTrigger? _externalTrigger;
     private readonly ScreenMap _screenMap = new();
     private readonly ToolTip _tips = new() { AutoPopDelay = 12000, InitialDelay = 400 };
@@ -33,7 +33,7 @@ public sealed partial class MainForm
         heading.ColumnStyles.Add(new(SizeType.Absolute, 430));
         var branding = new Panel { Dock = DockStyle.Fill };
         branding.Controls.Add(new Label { Text = "TinyMouseMacro", AutoSize = true, Location = new(0, 0), Font = Theme.TitleFont, Tag = "Title", ForeColor = Theme.CurrentTextPrimary });
-        branding.Controls.Add(new Label { Text = "多屏切换与操作录制，让常用动作回到一个按键。", AutoSize = true, Location = new(2, 38), Tag = "Body", Font = Theme.BodyFont, ForeColor = Theme.CurrentTextSecondary });
+        branding.Controls.Add(new Label { Text = "一键切换屏幕，录制与回放常用键鼠操作。", AutoSize = true, Location = new(2, 38), Tag = "Body", Font = Theme.BodyFont, ForeColor = Theme.CurrentTextSecondary });
         heading.Controls.Add(branding, 0, 0);
         var primary = Flow();
         primary.FlowDirection = FlowDirection.RightToLeft;
@@ -56,7 +56,7 @@ public sealed partial class MainForm
         workspace.Controls.Add(BuildIdentity(), 0, 0);
         _workspaceTabs.Dock = DockStyle.Fill; _workspaceTabs.Font = Theme.BodyFont;
         _workspaceTabs.Padding = new Point(18, 9);
-        TabPage compose = Page("方案编排"), options = Page("运行选项"), diagnostics = Page("快捷键诊断");
+        TabPage compose = Page("动作编排"), options = Page("运行参数"), diagnostics = Page("疑难诊断");
         compose.Controls.Add(BuildComposer()); options.Controls.Add(BuildOptions()); diagnostics.Controls.Add(BuildDiagnostics());
         _workspaceTabs.TabPages.AddRange([compose, options, diagnostics]);
         workspace.Controls.Add(_workspaceTabs, 0, 1); body.Controls.Add(workspace, 1, 0);
@@ -162,9 +162,9 @@ public sealed partial class MainForm
         actions.Controls.Add(CreateButton("＋ 等待", AddDelayStep, 95));
         _recordButton.Text = "●  录制操作"; _recordButton.Width = 133; _recordButton.Height = 38; _recordButton.Margin = new(3);
         Theme.StyleButton(_recordButton); _recordButton.Click += (_, _) => ToggleRecording(); actions.Controls.Add(_recordButton);
-        _recordKeyboardCheck.Text = "含键盘"; _recordKeyboardCheck.AutoSize = true; _recordKeyboardCheck.Margin = new(10, 11, 3, 0);
+        _recordKeyboardCheck.Text = "录制键盘"; _recordKeyboardCheck.AutoSize = true; _recordKeyboardCheck.Margin = new(10, 11, 3, 0);
         actions.Controls.Add(_recordKeyboardCheck);
-        actions.Controls.Add(CreateButton("更多动作…", AddCustomStep, 114)); panel.Controls.Add(actions, 0, 2);
+        actions.Controls.Add(CreateButton("添加动作…", AddCustomStep, 114)); panel.Controls.Add(actions, 0, 2);
         var steps = Grid(1, 2); steps.RowStyles.Add(new(SizeType.Absolute, 36)); steps.RowStyles.Add(new(SizeType.Percent, 100));
         _stepSummary.Dock = DockStyle.Fill; _stepSummary.Font = Theme.SectionFont; _stepSummary.ForeColor = Theme.CurrentTextPrimary;
         _stepSummary.TextAlign = ContentAlignment.MiddleLeft; steps.Controls.Add(_stepSummary, 0, 0);
@@ -186,10 +186,10 @@ public sealed partial class MainForm
     private Control BuildOptions()
     {
         var scroll = new Panel { Dock = DockStyle.Fill, AutoScroll = true };
-        var panel = Grid(2, 9, 20); panel.Dock = DockStyle.Top; panel.AutoSize = true; scroll.Controls.Add(panel);
+        var panel = Grid(2, 7, 20); panel.Dock = DockStyle.Top; panel.AutoSize = true; scroll.Controls.Add(panel);
         panel.ColumnStyles.Add(new(SizeType.Absolute, 210)); panel.ColumnStyles.Add(new(SizeType.Percent, 100));
         for (var i = 0; i < 6; i++) panel.RowStyles.Add(new(SizeType.Absolute, 52));
-        panel.RowStyles.Add(new(SizeType.Absolute, 56)); panel.RowStyles.Add(new(SizeType.Absolute, 80)); panel.RowStyles.Add(new(SizeType.AutoSize));
+        panel.RowStyles.Add(new(SizeType.Absolute, 80));
         _enabledCheckBox.Text = "允许快捷键与定时触发"; _enabledCheckBox.AutoSize = true;
         _enabledCheckBox.CheckedChanged += (_, _) => { if (_isBinding || CurrentProfile is null) return; CurrentProfile.Enabled = _enabledCheckBox.Checked; MarkDirty(); };
         Option(0, "启用方案", _enabledCheckBox);
@@ -202,11 +202,8 @@ public sealed partial class MainForm
         _targetWindowBox.PlaceholderText = "可选：运行前激活的完整窗口标题"; Theme.StyleTextBox(_targetWindowBox);
         _targetWindowBox.TextChanged += (_, _) => { if (_isBinding || CurrentProfile is null) return; CurrentProfile.TargetWindowTitle = _targetWindowBox.Text; MarkDirty(); };
         Option(5, "目标窗口", _targetWindowBox);
-        _releaseRemoteCheck.Text = "切屏前尝试释放 VMware / UU 鼠标捕获"; _releaseRemoteCheck.AutoSize = true;
-        _releaseRemoteCheck.CheckedChanged += (_, _) => { if (_isBinding || CurrentProfile is null) return; CurrentProfile.ReleaseRemoteInput = _releaseRemoteCheck.Checked; MarkDirty(); };
-        Option(6, "一键切回宿主", _releaseRemoteCheck);
-        var note = Hint("常用切屏方案保持：重复 1 次、速度 1 倍、定时关闭。\n录制保留操作间隔；键盘录制默认关闭。停止键：Ctrl+Alt+F10。");
-        panel.Controls.Add(note, 0, 7); panel.SetColumnSpan(note, 2);
+        var note = Hint("跨窗口的焦点与鼠标定位自动处理。\n录制保留操作间隔；键盘录制默认关闭。停止键：Ctrl+Alt+F10。");
+        panel.Controls.Add(note, 0, 6); panel.SetColumnSpan(note, 2);
         return scroll;
         void Option(int row, string name, Control input)
         { panel.Controls.Add(Heading(name), 0, row); input.Dock = DockStyle.Top; input.Margin = new(4, 9, 4, 4); panel.Controls.Add(input, 1, row); }
@@ -215,35 +212,43 @@ public sealed partial class MainForm
     private Control BuildDiagnostics()
     {
         var scroll = new Panel { Dock = DockStyle.Fill, AutoScroll = true };
-        var panel = Grid(1, 8, 18); panel.Dock = DockStyle.Top; panel.AutoSize = true;
+        var panel = Grid(1, 7, 18); panel.Dock = DockStyle.Top; panel.AutoSize = true;
         scroll.Controls.Add(panel);
         panel.RowStyles.Add(new(SizeType.Absolute, 40)); panel.RowStyles.Add(new(SizeType.Absolute, 46));
-        panel.RowStyles.Add(new(SizeType.Absolute, 74)); panel.RowStyles.Add(new(SizeType.Absolute, 52));
-        panel.RowStyles.Add(new(SizeType.Absolute, 68)); panel.RowStyles.Add(new(SizeType.Absolute, 48)); panel.RowStyles.Add(new(SizeType.Absolute, 32)); panel.RowStyles.Add(new(SizeType.Absolute, 170));
+        panel.RowStyles.Add(new(SizeType.Absolute, 48)); panel.RowStyles.Add(new(SizeType.Absolute, 52));
+        panel.RowStyles.Add(new(SizeType.Absolute, 32)); panel.RowStyles.Add(new(SizeType.Absolute, 200)); panel.RowStyles.Add(new(SizeType.AutoSize));
         _backendLabel.Dock = DockStyle.Fill; _backendLabel.Font = Theme.SectionFont; _backendLabel.ForeColor = Theme.CurrentTextPrimary;
         panel.Controls.Add(_backendLabel, 0, 0);
         var tools = Flow();
-        _diagnosticCheck.Text = "只检测快捷键，不执行方案"; _diagnosticCheck.AutoSize = true; _diagnosticCheck.Margin = new(4, 10, 16, 0);
-        _diagnosticCheck.CheckedChanged += (_, _) => { if (_hotkeys is not null) _hotkeys.DiagnosticMode = _diagnosticCheck.Checked; };
-        tools.Controls.Add(_diagnosticCheck); tools.Controls.Add(CreateButton("重新连接监听", () => RebuildHotkeys(true), 144)); panel.Controls.Add(tools, 0, 1);
-        _rawInputCheck.Text = "启用远程兼容（后台输入 + VMware 切回）"; _rawInputCheck.AutoSize = true;
-        _rawInputCheck.CheckedChanged += (_, _) => { if (_isBinding) return; SavePreferences(); RebuildHotkeys(); };
-        var raw = Grid(1, 2); raw.RowStyles.Add(new(SizeType.Absolute, 30)); raw.RowStyles.Add(new(SizeType.Percent, 100));
-        raw.Controls.Add(_rawInputCheck, 0, 0); raw.Controls.Add(Hint("后台输入会透传按键。VMware 跨窗口切屏会重试定位，稳定后点击；每次抓取最多重连监听两次。"), 0, 1);
-        panel.Controls.Add(raw, 0, 2);
+        _diagnosticCheck.Text = "临时只检测（不执行宏）"; _diagnosticCheck.AutoSize = true; _diagnosticCheck.Margin = new(4, 10, 16, 0);
+        _diagnosticCheck.CheckedChanged += (_, _) =>
+        {
+            if (_hotkeys is not null) _hotkeys.DiagnosticMode = _diagnosticCheck.Checked;
+            if (_diagnosticCheck.Checked) StopAll();
+            if (!_preview) SetStatus(_diagnosticCheck.Checked ? "诊断中：快捷键只记录，不执行宏。离开此页自动恢复。" : "已恢复正常执行");
+        };
+        _workspaceTabs.SelectedIndexChanged += (_, _) => { if (_workspaceTabs.SelectedIndex != 2) _diagnosticCheck.Checked = false; };
+        tools.Controls.Add(_diagnosticCheck); tools.Controls.Add(CreateButton("重置输入监听", () => RebuildHotkeys(true), 144)); panel.Controls.Add(tools, 0, 1);
+        panel.Controls.Add(Hint("全局监听与跨窗口定位默认启用。这里仅用于排查问题，日常使用无需调整。"), 0, 2);
         _lastSignal.Dock = DockStyle.Fill; _lastSignal.Font = Theme.BodyFont; _lastSignal.ForeColor = Theme.CurrentAccent;
-        _lastSignal.Text = "尚未检测。勾选“只检测”，切到 VMware / UU 后按方案快捷键，再回来查看来源。";
+        _lastSignal.Text = "最近一次触发：尚未检测。可临时勾选“只检测”，按方案快捷键后查看记录。";
         panel.Controls.Add(_lastSignal, 0, 3);
-        panel.Controls.Add(Hint("宿主 Windows 仍收到输入时，兼容监听可帮助触发；USB 键盘直通、驱动独占或安全桌面无法保证。\nVMware 可先用 Ctrl+Alt 释放输入。跨机器执行需要各系统自己的坐标；这里的目标始终是宿主显示器。"), 0, 4);
+        panel.Controls.Add(Heading("最近活动"), 0, 4);
+        _logList.Dock = DockStyle.Fill; _logList.IntegralHeight = false; Theme.StyleListBox(_logList);
+        panel.Controls.Add(_logList, 0, 5);
+        var advanced = Grid(1, 2); advanced.Dock = DockStyle.Top; advanced.AutoSize = true;
+        advanced.RowStyles.Add(new(SizeType.Absolute, 46)); advanced.RowStyles.Add(new(SizeType.Absolute, 0));
+        var expand = CreateButton("高级工具 ▸", () => { }, 130);
+        advanced.Controls.Add(expand, 0, 0);
         var external = Flow();
-        _externalTriggerCheck.Text = "允许 iCUE 启动切屏方案"; _externalTriggerCheck.AutoSize = true; _externalTriggerCheck.Margin = new(4, 10, 12, 0);
+        external.Visible = false;
+        var expanded = false;
+        expand.Click += (_, _) => { expanded = !expanded; external.Visible = expanded; advanced.RowStyles[1].Height = expanded ? 52 * DeviceDpi / 96f : 0; expand.Text = expanded ? "高级工具 ▾" : "高级工具 ▸"; };
+        _externalTriggerCheck.Text = "允许外部启动器触发切屏"; _externalTriggerCheck.AutoSize = true; _externalTriggerCheck.Margin = new(4, 10, 12, 0);
         _externalTriggerCheck.CheckedChanged += (_, _) => { if (_isBinding) return; SavePreferences(); ConfigureExternalTrigger(); };
         _tips.SetToolTip(_externalTriggerCheck, "允许当前桌面的本地程序触发已启用的一步移动／点击方案；不允许外部执行脚本、程序或任意命令。只在使用 iCUE 启动器时开启。");
-        external.Controls.Add(_externalTriggerCheck); external.Controls.Add(CreateButton("生成当前方案启动器…", ExportLauncher, 186));
-        panel.Controls.Add(external, 0, 5);
-        panel.Controls.Add(Heading("最近活动"), 0, 6);
-        _logList.Dock = DockStyle.Fill; _logList.IntegralHeight = false; Theme.StyleListBox(_logList);
-        panel.Controls.Add(_logList, 0, 7); return scroll;
+        external.Controls.Add(_externalTriggerCheck); external.Controls.Add(CreateButton("生成启动器…", ExportLauncher, 140));
+        advanced.Controls.Add(external, 0, 1); panel.Controls.Add(advanced, 0, 6); return scroll;
     }
 
     private void SetupNumber(NumericUpDown input, Action update)

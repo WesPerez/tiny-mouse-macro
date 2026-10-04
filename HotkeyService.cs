@@ -74,7 +74,7 @@ public sealed class HotkeyService : IDisposable
         });
     }
 
-    public List<string> RegisterAll(IEnumerable<MacroProfile> profiles, bool rawInput = false, bool force = false)
+    public List<string> RegisterAll(IEnumerable<MacroProfile> profiles, bool rawInput = true, bool force = false)
     {
         var snapshots = profiles.Select(p => new { p.Id, p.Name, p.Enabled, p.TriggerType,
             p.TriggerKey, p.TriggerModifiers, p.Hotkey, p.TriggerMouseButton }).ToArray();
@@ -301,7 +301,7 @@ public sealed class HotkeyService : IDisposable
         var previous = _keyboardHook; _keyboardHook = replacement;
         if (previous != 0) NativeMethods.UnhookWindowsHookEx(previous);
         // Keep key-down/up pairing, swallowed keys and all system registrations.
-        DiagnosticMessage?.Invoke("VMware 抓取后已重连键盘监听；请松开组合键后再按一次。重连不代表已收到按键。");
+        DiagnosticMessage?.Invoke("已自动恢复 VMware 前台输入监听。");
     }
     private void ReportUnmatchedKey(int key, uint modifiers, string source)
     {
