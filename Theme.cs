@@ -4,9 +4,9 @@ internal static class Theme
 {
     public static bool IsDark { get; private set; }
 
-    public static readonly Color Bg = Color.FromArgb(0xF4, 0xF6, 0xFA);
-    public static readonly Color Surface = Color.FromArgb(0xEA, 0xEE, 0xF5);
-    public static readonly Color Card = Color.FromArgb(0xE1, 0xE8, 0xF3);
+    public static readonly Color Bg = Color.FromArgb(0xF5, 0xF6, 0xF8);
+    public static readonly Color Surface = Color.White;
+    public static readonly Color Card = Color.FromArgb(0xEC, 0xF1, 0xF9);
     public static readonly Color Border = Color.FromArgb(0xD7, 0xDF, 0xEC);
     public static readonly Color Accent = Color.FromArgb(0x35, 0x61, 0xD8);
     public static readonly Color AccentDim = Color.FromArgb(0x28, 0x49, 0xB0);
@@ -24,21 +24,22 @@ internal static class Theme
     public static readonly FontFamily UiFont = new FontFamily("Microsoft YaHei UI");
     public static readonly FontFamily MonoFont = new FontFamily("Consolas");
 
-    public static Color CurrentBg => IsDark ? Color.FromArgb(0x1E, 0x1E, 0x2E) : Bg;
-    public static Color CurrentSurface => IsDark ? Color.FromArgb(0x2D, 0x2D, 0x3F) : Surface;
-    public static Color CurrentCard => IsDark ? Color.FromArgb(0x3A, 0x3A, 0x50) : Card;
-    public static Color CurrentBorder => IsDark ? Color.FromArgb(0x50, 0x50, 0x6E) : Border;
-    public static Color CurrentAccent => IsDark ? Color.FromArgb(0x4F, 0xC3, 0xF7) : Accent;
+    public static Color CurrentBg => IsDark ? Color.FromArgb(0x17, 0x1B, 0x22) : Bg;
+    public static Color CurrentSurface => IsDark ? Color.FromArgb(0x21, 0x27, 0x31) : Surface;
+    public static Color CurrentCard => IsDark ? Color.FromArgb(0x2C, 0x35, 0x43) : Card;
+    public static Color CurrentBorder => IsDark ? Color.FromArgb(0x3B, 0x45, 0x55) : Border;
+    public static Color CurrentAccent => IsDark ? Color.FromArgb(0x82, 0xAE, 0xFF) : Accent;
     public static Color CurrentAccentDim => IsDark ? Color.FromArgb(0x39, 0xAD, 0xE5) : AccentDim;
     public static Color CurrentTextPrimary => IsDark ? Color.FromArgb(0xE0, 0xE0, 0xF0) : TextPrimary;
     public static Color CurrentTextSecondary => IsDark ? Color.FromArgb(0xA0, 0xA0, 0xC0) : TextSecondary;
     public static Color CurrentTextMuted => IsDark ? Color.FromArgb(0x70, 0x70, 0x90) : TextMuted;
-    public static Color CurrentInputBg => IsDark ? Color.FromArgb(0x2A, 0x2A, 0x3C) : InputBg;
-    public static Color CurrentListBg => IsDark ? Color.FromArgb(0x2A, 0x2A, 0x3C) : ListBg;
+    public static Color CurrentInputBg => IsDark ? Color.FromArgb(0x1B, 0x21, 0x2A) : InputBg;
+    public static Color CurrentListBg => CurrentSurface;
     public static Color CurrentListSelected => IsDark ? Color.FromArgb(0x4F, 0xC3, 0xF7) : ListSelected;
-    public static Color CurrentListSelectedBg => IsDark ? Color.FromArgb(0x2D, 0x2D, 0x4F) : ListSelectedBg;
+    public static Color CurrentListSelectedBg => IsDark ? Color.FromArgb(0x2D, 0x3D, 0x58) : Color.FromArgb(0xEC, 0xF2, 0xFF);
 
     public static readonly Font TitleFont = new(UiFont, 20F, FontStyle.Bold);
+    public static readonly Font ActivityFont = new(UiFont, 12F, FontStyle.Bold);
     public static readonly Font BodyFont = new(UiFont, 9.5F);
     public static readonly Font SmallFont = new(UiFont, 8.5F);
     public static readonly Font SectionFont = new(UiFont, 9.5F, FontStyle.Bold);
@@ -65,7 +66,7 @@ internal static class Theme
         button.FlatAppearance.MouseDownBackColor = CurrentAccentDim;
         button.BackColor = CurrentSurface;
         button.ForeColor = CurrentTextPrimary;
-        button.Font = SmallFont;
+        button.Font = BodyFont;
         button.Cursor = Cursors.Hand;
     }
 
@@ -74,7 +75,7 @@ internal static class Theme
         StyleButton(button);
         button.FlatAppearance.BorderColor = CurrentAccent;
         button.BackColor = CurrentAccent;
-        button.ForeColor = Color.White;
+        button.ForeColor = IsDark ? Color.FromArgb(0x10, 0x23, 0x40) : Color.White;
         button.FlatAppearance.MouseOverBackColor = CurrentAccentDim;
         button.FlatAppearance.MouseDownBackColor = CurrentAccent;
     }
@@ -106,7 +107,7 @@ internal static class Theme
     {
         listBox.BackColor = CurrentListBg;
         listBox.ForeColor = CurrentTextPrimary;
-        listBox.BorderStyle = BorderStyle.FixedSingle;
+        listBox.BorderStyle = BorderStyle.None;
         listBox.Font = BodyFont;
         listBox.DrawMode = DrawMode.OwnerDrawFixed;
         listBox.ItemHeight = listBox.Tag as string == "Profiles" ? 64 : listBox.Tag as string == "Steps" ? 48 : 30;
@@ -135,8 +136,11 @@ internal static class Theme
         var flags = TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix;
         if (lb.Items[e.Index] is MacroProfile profile)
         {
-            TextRenderer.DrawText(e.Graphics, profile.Name, SectionFont, new Rectangle(textRect.X, textRect.Y + 5, textRect.Width, 23), color, flags);
-            TextRenderer.DrawText(e.Graphics, $"{(profile.Enabled ? "●" : "○")}  {profile.ShortcutText}   ·   {profile.Steps.Count} 步", SmallFont,
+            var active = lb is ProfileListBox profiles && profiles.ActiveProfileId == profile.Id;
+            var name = active ? $"▶  {profile.Name}" : profile.Name;
+            TextRenderer.DrawText(e.Graphics, name, SectionFont, new Rectangle(textRect.X, textRect.Y + 5, textRect.Width, 23), active ? CurrentAccent : color, flags);
+            var secondary = active ? $"{((ProfileListBox)lb).ActivityText} · {profile.ShortcutText}" : $"{profile.ShortcutText}   ·   {profile.Steps.Count} 步{(profile.Enabled ? "" : " · 未启用")}";
+            TextRenderer.DrawText(e.Graphics, secondary, SmallFont,
                 new Rectangle(textRect.X, textRect.Y + 30, textRect.Width, 22), CurrentTextSecondary, flags);
         }
         else if (lb.Items[e.Index] is MacroStep step)
@@ -186,9 +190,22 @@ internal static class Theme
         panel.BackColor = CurrentBg;
     }
 
+    public static Color Tint(Color color)
+    {
+        var background = CurrentSurface;
+        return Color.FromArgb((color.R + background.R * 7) / 8, (color.G + background.G * 7) / 8, (color.B + background.B * 7) / 8);
+    }
+
+    public static void SurfaceTree(Control control)
+    {
+        if (control is Panel or TableLayoutPanel or FlowLayoutPanel)
+        { control.BackColor = CurrentSurface; control.Tag = "Surface"; }
+        foreach (Control child in control.Controls) SurfaceTree(child);
+    }
+
     public static void StyleSectionHeader(Label label)
     {
-        label.ForeColor = CurrentAccent;
+        label.ForeColor = CurrentTextPrimary;
         label.Font = SectionFont;
     }
 

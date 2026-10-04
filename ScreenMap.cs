@@ -34,7 +34,7 @@ internal sealed class ScreenMap : Control
             using var line = new Pen(Focused && i == _keyboardScreen ? Theme.CurrentAccent : Theme.CurrentBorder, 2);
             e.Graphics.FillRectangle(fill, rect); e.Graphics.DrawRectangle(line, rect.X, rect.Y, rect.Width, rect.Height);
             TextRenderer.DrawText(e.Graphics, $"屏幕 {i + 1}{(screen.Primary ? " · 主屏" : "")}", Theme.SectionFont,
-                Rectangle.Round(rect), Theme.CurrentTextPrimary, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+                Rectangle.Round(rect), Theme.CurrentTextPrimary, TextFormatFlags.SingleLine | TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
         }
         foreach (var point in Targets)
         {

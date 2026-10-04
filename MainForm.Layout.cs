@@ -3,8 +3,9 @@ namespace TinyMouseMacro;
 public sealed partial class MainForm
 {
     private readonly Label _saveState = new(), _stepSummary = new(), _backendLabel = new(), _lastSignal = new();
-    private readonly Button _recordButton = new(), _pauseButton = new();
-    private readonly CheckBox _diagnosticCheck = new(), _recordKeyboardCheck = new();
+    private readonly Button _recordButton = new(), _pauseButton = new(), _runButton = new();
+    private readonly ThemeToggleButton _themeButton = new();
+    private readonly CheckBox _diagnosticCheck = new();
     private readonly CheckBox _externalTriggerCheck = new();
     private ExternalTrigger? _externalTrigger;
     private readonly ScreenMap _screenMap = new();
@@ -23,32 +24,29 @@ public sealed partial class MainForm
     private void BuildUi()
     {
         SuspendLayout();
-        var root = Grid(1, 3, 18);
-        root.RowStyles.Add(new(SizeType.Absolute, 76));
+        var root = Grid(1, 4, 18);
+        root.RowStyles.Add(new(SizeType.Absolute, 68));
+        root.RowStyles.Add(new(SizeType.Absolute, 84));
         root.RowStyles.Add(new(SizeType.Percent, 100));
         root.RowStyles.Add(new(SizeType.Absolute, 38));
         Controls.Add(root);
 
         var heading = Grid(2, 1);
         heading.ColumnStyles.Add(new(SizeType.Percent, 100));
-        heading.ColumnStyles.Add(new(SizeType.Absolute, 300));
+        heading.ColumnStyles.Add(new(SizeType.Absolute, 52));
         var branding = new Panel { Dock = DockStyle.Fill };
         branding.Controls.Add(new Label { Text = "TinyMouseMacro", AutoSize = true, Location = new(0, 0), Font = Theme.TitleFont, Tag = "Title", ForeColor = Theme.CurrentTextPrimary });
         branding.Controls.Add(new Label { Text = "一键切换屏幕，录制与回放常用键鼠操作。", AutoSize = true, Location = new(2, 38), Tag = "Body", Font = Theme.BodyFont, ForeColor = Theme.CurrentTextSecondary });
         heading.Controls.Add(branding, 0, 0);
-        var primary = Flow();
-        primary.FlowDirection = FlowDirection.RightToLeft;
-        primary.Padding = new(0, 9, 0, 0);
-        _cancelButton.Text = "停止  Ctrl+Alt+F10";
-        _cancelButton.Width = 172; _cancelButton.Height = 38; _cancelButton.Visible = true;
-        primary.Controls.Add(_cancelButton);
-        primary.Controls.Add(CreateAccentButton("▶  运行方案", TestRun, 114));
-        heading.Controls.Add(primary, 1, 0); root.Controls.Add(heading, 0, 0);
+        _themeButton.Size = new(42, 42); _themeButton.Margin = new(6, 4, 0, 0);
+        _themeButton.Click += (_, _) => ToggleTheme();
+        heading.Controls.Add(_themeButton, 1, 0); root.Controls.Add(heading, 0, 0);
+        root.Controls.Add(BuildActivityBar(), 0, 1);
 
         var body = Grid(2, 1);
         body.ColumnStyles.Add(new(SizeType.Absolute, 238));
         body.ColumnStyles.Add(new(SizeType.Percent, 100));
-        root.Controls.Add(body, 0, 1);
+        body.Padding = new(0, 12, 0, 0); root.Controls.Add(body, 0, 2);
         body.Controls.Add(BuildSidebar(), 0, 0);
         var workspace = Grid(1, 2); workspace.Padding = new(18, 0, 0, 0);
         workspace.RowStyles.Add(new(SizeType.Absolute, 90));
@@ -68,15 +66,18 @@ public sealed partial class MainForm
         Theme.StyleStatusBar(_statusLabel); footer.Controls.Add(_statusLabel, 0, 0);
         _saveState.Dock = DockStyle.Fill; _saveState.TextAlign = ContentAlignment.MiddleRight;
         _saveState.Font = Theme.BodyFont; _saveState.ForeColor = Theme.CurrentTextSecondary;
-        footer.Controls.Add(_saveState, 1, 0); root.Controls.Add(footer, 0, 2);
+        footer.Controls.Add(_saveState, 1, 0); root.Controls.Add(footer, 0, 3);
         _saveTimer.Tick += (_, _) => { _saveTimer.Stop(); SaveAll(); };
         _recordUiTimer.Tick += (_, _) => FlushRecording();
+        _activityTimer.Tick += (_, _) => { if (_activityMode != ActivityMode.Idle) RefreshActivityDisplay(); };
+        _activityTimer.Start();
+        RefreshActivityDisplay();
         ResumeLayout(true);
     }
 
     private Control BuildSidebar()
     {
-        var panel = Grid(1, 5, 12); panel.BackColor = Theme.CurrentSurface;
+        var panel = Grid(1, 5, 12);
         panel.RowStyles.Add(new(SizeType.Absolute, 36)); panel.RowStyles.Add(new(SizeType.Absolute, 42));
         panel.RowStyles.Add(new(SizeType.Percent, 100)); panel.RowStyles.Add(new(SizeType.Absolute, 46));
         panel.RowStyles.Add(new(SizeType.Absolute, 74));
@@ -96,7 +97,6 @@ public sealed partial class MainForm
         menu.Items.Add("导出当前方案…", null, (_, _) => ExportProfile());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("删除当前方案…", null, (_, _) => DeleteProfile());
-        menu.Items.Add("切换明暗主题", null, (_, _) => ToggleTheme());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("运行记录…", null, (_, _) => OpenToolPanel(_diagnosticsPanel, "运行记录"));
         more.Click += (_, _) => menu.Show(more, new Point(0, more.Height)); buttons.Controls.Add(more);
@@ -106,7 +106,7 @@ public sealed partial class MainForm
         _pauseButton.Click += (_, _) => ToggleGlobalPause(); bottom.Controls.Add(_pauseButton, 0, 0);
         bottom.Controls.Add(Hint("Ctrl+Alt+P 暂停 / 恢复"), 0, 1);
         panel.Controls.Add(bottom, 0, 4);
-        return panel;
+        Theme.SurfaceTree(panel); return panel;
     }
 
     private Control BuildIdentity()
@@ -154,8 +154,8 @@ public sealed partial class MainForm
     private Control BuildComposer()
     {
         var panel = Grid(1, 5, 12);
-        panel.RowStyles.Add(new(SizeType.Absolute, 36)); panel.RowStyles.Add(new(SizeType.Absolute, 148));
-        panel.RowStyles.Add(new(SizeType.Absolute, 52)); panel.RowStyles.Add(new(SizeType.Percent, 100)); panel.RowStyles.Add(new(SizeType.Absolute, 46));
+        panel.RowStyles.Add(new(SizeType.Absolute, 32)); panel.RowStyles.Add(new(SizeType.Absolute, 114));
+        panel.RowStyles.Add(new(SizeType.Absolute, 58)); panel.RowStyles.Add(new(SizeType.Percent, 100)); panel.RowStyles.Add(new(SizeType.Absolute, 46));
         var title = Grid(2, 1); title.ColumnStyles.Add(new(SizeType.Percent, 100)); title.ColumnStyles.Add(new(SizeType.Absolute, 300));
         title.Controls.Add(Heading("选择鼠标位置"), 0, 0);
         _livePositionLabel.Dock = DockStyle.Fill; _livePositionLabel.TextAlign = ContentAlignment.MiddleRight;
@@ -163,16 +163,20 @@ public sealed partial class MainForm
         title.Controls.Add(_livePositionLabel, 1, 0); panel.Controls.Add(title, 0, 0);
         _screenMap.Dock = DockStyle.Fill; _screenMap.AccessibleName = "显示器布局：点击设置目标位置，不会移动真实鼠标";
         _screenMap.PointChosen += point => SetTargetPoint(point); panel.Controls.Add(_screenMap, 0, 1);
-        var actions = Flow();
-        actions.Controls.Add(CreateButton("◎  3 秒后取点", async () => await CapturePointAfterDelayAsync(true), 142));
-        actions.Controls.Add(CreateButton("＋ 等待", AddDelayStep, 95));
-        _recordButton.Text = "●  录制操作"; _recordButton.Width = 133; _recordButton.Height = 38; _recordButton.Margin = new(3);
-        Theme.StyleButton(_recordButton); _recordButton.Click += (_, _) => ToggleRecording(); actions.Controls.Add(_recordButton);
-        _recordKeyboardCheck.Text = "录制键盘"; _recordKeyboardCheck.AutoSize = true; _recordKeyboardCheck.Margin = new(10, 11, 3, 0);
-        actions.Controls.Add(_recordKeyboardCheck);
-        actions.Controls.Add(CreateButton("添加动作…", AddCustomStep, 114)); panel.Controls.Add(actions, 0, 2);
+        var actions = Grid(4, 1); actions.Padding = new(0, 7, 0, 7);
+        foreach (var width in new[] { 29f, 20f, 25f, 26f }) actions.ColumnStyles.Add(new(SizeType.Percent, width));
+        var pick = CreateButton("定位点击（3 秒后）", async () => await CapturePointAfterDelayAsync(true), 160);
+        _tips.SetToolTip(pick, "点击后把鼠标移到目标位置，3 秒后添加左键点击步骤。此时只记住位置。");
+        var delay = CreateButton("加延迟…", AddDelayStep, 100);
+        _recordButton.Text = "●  开始录制"; _recordButton.Margin = new(3);
+        Theme.StyleButton(_recordButton); _recordButton.Click += (_, _) => ToggleRecording();
+        _tips.SetToolTip(_recordButton, "3 秒后开始录制鼠标、键盘和操作间隔，追加到当前方案。");
+        var add = CreateButton("添加其他动作…", AddCustomStep, 150);
+        var actionButtons = new Button[] { pick, delay, _recordButton, add };
+        for (var i = 0; i < actionButtons.Length; i++) { actionButtons[i].Dock = DockStyle.Fill; actions.Controls.Add(actionButtons[i], i, 0); }
+        panel.Controls.Add(actions, 0, 2);
         var steps = Grid(1, 2); steps.RowStyles.Add(new(SizeType.Absolute, 36)); steps.RowStyles.Add(new(SizeType.Percent, 100));
-        _stepSummary.Dock = DockStyle.Fill; _stepSummary.Font = Theme.SectionFont; _stepSummary.ForeColor = Theme.CurrentTextPrimary;
+        _stepSummary.Dock = DockStyle.Fill; _stepSummary.Tag = ThemeRoleSectionHeader; _stepSummary.Font = Theme.SectionFont; _stepSummary.ForeColor = Theme.CurrentTextPrimary;
         _stepSummary.TextAlign = ContentAlignment.MiddleLeft; steps.Controls.Add(_stepSummary, 0, 0);
         _stepList.Dock = DockStyle.Fill; _stepList.IntegralHeight = false; _stepList.DataSource = _stepsSource;
         _stepList.Tag = "Steps"; Theme.StyleListBox(_stepList); _stepList.ItemHeight = 48;
@@ -187,7 +191,7 @@ public sealed partial class MainForm
         edit.Controls.Add(CreateButton("↓", MoveStepDown, 46)); edit.Controls.Add(CreateButton("删除", DeleteStep, 76));
         edit.Controls.Add(CreateButton("重复与定时…", () => OpenToolPanel(_optionsPanel, "运行设置"), 142));
         _tips.SetToolTip(_stepList, "双击编辑，拖动调整顺序");
-        panel.Controls.Add(edit, 0, 4); return panel;
+        panel.Controls.Add(edit, 0, 4); Theme.SurfaceTree(panel); return panel;
     }
 
     private Control BuildOptions()
@@ -218,7 +222,7 @@ public sealed partial class MainForm
         panel.RowStyles.Add(new(SizeType.Absolute, 40)); panel.RowStyles.Add(new(SizeType.Absolute, 46));
         panel.RowStyles.Add(new(SizeType.Absolute, 48)); panel.RowStyles.Add(new(SizeType.Absolute, 52));
         panel.RowStyles.Add(new(SizeType.Absolute, 32)); panel.RowStyles.Add(new(SizeType.Absolute, 200)); panel.RowStyles.Add(new(SizeType.AutoSize));
-        _backendLabel.Dock = DockStyle.Fill; _backendLabel.Font = Theme.SectionFont; _backendLabel.ForeColor = Theme.CurrentTextPrimary;
+        _backendLabel.Dock = DockStyle.Fill; _backendLabel.Tag = ThemeRoleSectionHeader; _backendLabel.Font = Theme.SectionFont; _backendLabel.ForeColor = Theme.CurrentTextPrimary;
         panel.Controls.Add(_backendLabel, 0, 0);
         var tools = Flow();
         _diagnosticCheck.Text = "测试快捷键（不运行操作）"; _diagnosticCheck.AutoSize = true; _diagnosticCheck.Margin = new(4, 10, 16, 0);
@@ -227,6 +231,7 @@ public sealed partial class MainForm
             if (_hotkeys is not null) _hotkeys.DiagnosticMode = _diagnosticCheck.Checked;
             if (_diagnosticCheck.Checked) StopAll();
             if (!_preview) SetStatus(_diagnosticCheck.Checked ? "正在测试快捷键，暂不执行操作" : "已恢复正常执行");
+            RefreshActivityDisplay();
         };
         tools.Controls.Add(_diagnosticCheck); tools.Controls.Add(CreateButton("重新连接快捷键", () => RebuildHotkeys(true), 154)); panel.Controls.Add(tools, 0, 1);
         panel.Controls.Add(CreateButton("查看详细日志…", OpenActivityLog, 160), 0, 2);
@@ -300,7 +305,7 @@ public sealed partial class MainForm
     {
         if (IsCapturing || CurrentProfile is null) return;
         var step = new MacroStep { Type = MacroStepType.Move };
-        using var dialog = new StepEditDialog(step) { StartPosition = FormStartPosition.CenterParent };
+        using var dialog = new StepEditDialog(step) { Text = "添加动作", StartPosition = FormStartPosition.CenterParent };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
         ApplyStepEdit(step, dialog); AddStep(step);
     }
@@ -321,5 +326,6 @@ public sealed partial class MainForm
         _stepSummary.Text = $"操作步骤 · {steps.Count} 步" + (ms > 0 ? $" · 等待共 {ms / 1000.0:0.##} 秒" : "");
         _screenMap.Targets = steps.Where(s => IsPositionStep(s.Type)).Select(s => new Point(s.X, s.Y)).ToArray();
         _screenMap.Invalidate();
+        RefreshActivityDisplay();
     }
 }

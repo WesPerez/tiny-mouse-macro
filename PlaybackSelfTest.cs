@@ -52,6 +52,10 @@ internal static class PlaybackSelfTest
             Fails(() => executor.RunAsync(new() { TargetWindowTitle = "test", Steps = [Key()] }).GetAwaiter().GetResult()) && input.Events.Count == 0);
 
         var bounds = new Rectangle(-1920, -1080, 8320, 2520);
+        desktop = new(); input = new(desktop); executor = new(desktop, input);
+        executor.RunAsync(new() { Steps = [new() { Type = MacroStepType.KeyPress, KeyCode = (int)Keys.Menu }] }).GetAwaiter().GetResult();
+        check("standalone Alt plays one key-down and key-up without a hotkey parser", input.Events.SequenceEqual(["key:18:True@11", "key:18:False@11"]));
+
         var motion = WindowsPlaybackInput.AbsoluteMovePacket(new(2272, -457), bounds).U.Mi;
         var decoded = new Point(bounds.X + (int)((long)motion.Dx * bounds.Width / 65536), bounds.Y + (int)((long)motion.Dy * bounds.Height / 65536));
         check("absolute motion maps negative multi-monitor coordinates to the requested pixel", decoded == new Point(2272, -457));

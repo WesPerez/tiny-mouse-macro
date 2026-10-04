@@ -23,9 +23,9 @@ public sealed class HotkeyService : IDisposable
     private string? _configurationKey;
     private List<string> _registrationErrors = [];
     private readonly System.Windows.Forms.Timer _stateRecovery = new() { Interval = 500 };
-    private readonly System.Windows.Forms.Timer _vmwareRecoveryTimer = new() { Interval = 300 };
-    private readonly VmwareReconnectBudget _vmwareReconnect = new();
-    private bool _vmwareForeground;
+    private readonly System.Windows.Forms.Timer _remoteRecoveryTimer = new() { Interval = 300 };
+    private readonly RemoteReconnectBudget _remoteReconnect = new();
+    private bool _remoteForeground;
     private long _lastMismatch;
     private long _lastKeyboardActivity;
     private nint _lastForeground;
@@ -71,7 +71,7 @@ public sealed class HotkeyService : IDisposable
         _thread.Invoke(() =>
         {
             _stateRecovery.Tick += (_, _) => RecoverKeyState();
-            _vmwareRecoveryTimer.Tick += (_, _) => ReconnectForVmware();
+            _remoteRecoveryTimer.Tick += (_, _) => ReconnectForRemote();
             _stateRecovery.Start();
         });
     }
@@ -174,12 +174,10 @@ public sealed class HotkeyService : IDisposable
                 if (down && _swallowed.Contains(key)) return 1;
                 if (down && fresh && _keyboard.TryGetValue(new(key, _hookState.Modifiers), out var b) && CanDispatch(b))
                 {
-                    // Let registered chords reach WM_HOTKEY outside a captured console.
-                    // Swallowing every key here prevented the OS hotkey route entirely.
-                    // The raw-input path remains the fallback; VMware needs the hook first.
-                    if (_systemChords.Contains(b.Chord) && !_vmwareForeground)
-                        return NativeMethods.CallNextHookEx(_keyboardHook, code, message, data);
-                    Dispatch(b, "键盘监听", kb.Time); _swallowed.Add(key); return 1;
+                    return HotkeyHookRoute.Handle(_systemChords.Contains(b.Chord),
+                        _remoteForeground && NativeMethods.GetForegroundWindow() == _lastForeground,
+                        () => NativeMethods.CallNextHookEx(_keyboardHook, code, message, data),
+                        swallowFollowing => { Dispatch(b, "键盘监听", kb.Time); if (swallowFollowing) _swallowed.Add(key); });
                 }
                 if (down && fresh) ReportUnmatchedKey(key, _hookState.Modifiers, "键盘监听");
             }
@@ -200,7 +198,7 @@ public sealed class HotkeyService : IDisposable
                     if (message == NativeMethods.WmLbuttonDown)
                     {
                         // Observe only. No process lookup or hook changes in the callback.
-                        if (_rawEnabled) _thread.Post(ObserveVmwareClick);
+                        if (_rawEnabled) _thread.Post(ObserveRemoteClick);
                     }
                     else
                     {
@@ -272,46 +270,50 @@ public sealed class HotkeyService : IDisposable
         {
             _lastForeground = foreground;
             _hookState.SynchronizeModifiers(); _rawState.SynchronizeModifiers();
-            _vmwareForeground = _rawEnabled && IsVmwareWindow(foreground);
-            _vmwareReconnect.ObserveForeground(_vmwareForeground ? foreground : 0);
-            if (_vmwareForeground) RequestVmwareReconnect();
-            else _vmwareRecoveryTimer.Stop();
+            _remoteForeground = IsRemoteWindow(foreground);
+            _remoteReconnect.ObserveForeground(_remoteForeground ? foreground : 0);
+            if (_remoteForeground)
+            {
+                DiagnosticMessage?.Invoke($"已进入远程窗口 · 0x{foreground:X} · 自动维护快捷键监听");
+                RequestRemoteReconnect();
+            }
+            else _remoteRecoveryTimer.Stop();
         }
-        if (_vmwareForeground && NativeMethods.GetClipCursor(out var clip) && NativeMethods.GetWindowRect(foreground, out var bounds))
+        if (_remoteForeground && NativeMethods.GetClipCursor(out var clip) && NativeMethods.GetWindowRect(foreground, out var bounds))
         {
             var clipped = clip.Left >= bounds.Left && clip.Top >= bounds.Top &&
                 clip.Right <= bounds.Right && clip.Bottom <= bounds.Bottom;
-            if (_vmwareReconnect.ObserveCapture(clipped)) RequestVmwareReconnect();
+            if (_remoteReconnect.ObserveCapture(clipped)) RequestRemoteReconnect();
         }
-        // No recurring hook reinstalls: only bounded VMware focus/click transitions.
+        // No recurring hook reinstalls: only bounded remote focus/click transitions.
         // A quiet period clears stale main-key latches after missed key-up / desktop changes.
         if (Environment.TickCount64 - _lastKeyboardActivity < 1500) return;
         _hookState.RemoveReleasedKeys(); _rawState.RemoveReleasedKeys();
         _swallowed.RemoveWhere(key => (NativeMethods.GetAsyncKeyState(key) & 0x8000) == 0);
     }
-    private void ObserveVmwareClick()
+    private void ObserveRemoteClick()
     {
         if (!_rawEnabled || _suspended || _paused) return;
         RecoverKeyState();
-        if (_vmwareForeground) RequestVmwareReconnect();
+        if (_remoteForeground) RequestRemoteReconnect();
     }
-    private void RequestVmwareReconnect()
+    private void RequestRemoteReconnect()
     {
-        if (_suspended || _paused || !_vmwareReconnect.Request()) return;
-        _vmwareRecoveryTimer.Start();
+        if (_suspended || _paused || !_remoteReconnect.Request()) return;
+        _remoteRecoveryTimer.Start();
     }
-    private void ReconnectForVmware()
+    private void ReconnectForRemote()
     {
-        _vmwareRecoveryTimer.Stop();
-        if (!_vmwareReconnect.Consume() || !_rawEnabled || _suspended || _paused ||
-            NativeMethods.GetForegroundWindow() != _lastForeground || !_vmwareForeground || _keyboardProc is null) return;
+        _remoteRecoveryTimer.Stop();
+        if (!_remoteReconnect.Consume() || !_rawEnabled || _suspended || _paused ||
+            NativeMethods.GetForegroundWindow() != _lastForeground || !_remoteForeground || _keyboardProc is null) return;
         // Install first: a failed replacement leaves the old hook intact.
         var replacement = NativeMethods.SetWindowsHookExW(NativeMethods.WhKeyboardLl, _keyboardProc, NativeMethods.GetModuleHandleW(null), 0);
-        if (replacement == 0) { DiagnosticMessage?.Invoke("VMware 监听重连失败：" + LastError()); return; }
+        if (replacement == 0) { DiagnosticMessage?.Invoke("远程窗口监听重连失败：" + LastError()); return; }
         var previous = _keyboardHook; _keyboardHook = replacement;
         if (previous != 0) NativeMethods.UnhookWindowsHookEx(previous);
         // Keep key-down/up pairing, swallowed keys and all system registrations.
-        DiagnosticMessage?.Invoke("已自动恢复 VMware 前台输入监听。");
+        DiagnosticMessage?.Invoke("已自动重连远程窗口输入监听。");
     }
     private void ReportUnmatchedKey(int key, uint modifiers, string source)
     {
@@ -326,13 +328,13 @@ public sealed class HotkeyService : IDisposable
             DiagnosticMessage?.Invoke($"{source}收到 {HotkeyParser.Normalize(modifiers, (uint)key)}，未匹配 {string.Join(" / ", expected)}；系统当前修饰键：{HotkeyParser.FormatModifiers(asyncState.Modifiers)}。未执行。");
         });
     }
-    private static bool IsVmwareWindow(nint window)
+    private static bool IsRemoteWindow(nint window)
     {
         NativeMethods.GetWindowThreadProcessId(window, out var id);
         try
         {
             using var process = System.Diagnostics.Process.GetProcessById(id);
-            return DesktopSwitcher.IsVmwareProcess(process.ProcessName);
+            return DesktopSwitcher.IsRemoteProcess(process.ProcessName);
         }
         catch (ArgumentException) { return false; }
         catch (InvalidOperationException) { return false; }
@@ -340,8 +342,8 @@ public sealed class HotkeyService : IDisposable
     }
     private void ClearCore()
     {
-        _vmwareRecoveryTimer.Stop(); _vmwareReconnect.ObserveForeground(0);
-        _lastForeground = 0; _vmwareForeground = false;
+        _remoteRecoveryTimer.Stop(); _remoteReconnect.ObserveForeground(0);
+        _lastForeground = 0; _remoteForeground = false;
         foreach (var id in _registered.Keys) NativeMethods.UnregisterHotKey(_thread.Handle, id);
         _registered.Clear(); _systemChords.Clear(); _keyboard.Clear(); _mouse.Clear();
         if (_keyboardHook != 0) NativeMethods.UnhookWindowsHookEx(_keyboardHook);
@@ -356,7 +358,7 @@ public sealed class HotkeyService : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        _thread.Invoke(() => { _stateRecovery.Dispose(); ClearCore(); _vmwareRecoveryTimer.Dispose(); });
+        _thread.Invoke(() => { _stateRecovery.Dispose(); ClearCore(); _remoteRecoveryTimer.Dispose(); });
         _thread.Dispose();
     }
     private sealed record Binding(string Id, string Name, KeyChord Chord);
@@ -367,8 +369,28 @@ internal readonly record struct KeyChord(int Key, uint Modifiers)
     public override string ToString() => HotkeyParser.Normalize(Modifiers, (uint)Key);
 }
 
+internal static class HotkeyHookRoute
+{
+    // Ordinary windows keep WM_HOTKEY (and its foreground activation permission).
+    // Captured consoles need direct dispatch before their hook consumes the chord.
+    // If focus detection has not caught up, a downstream hook's nonzero result
+    // tells us WM_HOTKEY will not arrive: dispatch the matched chord here instead.
+    internal static nint Handle(bool registered, bool remoteForeground, Func<nint> nextHook, Action<bool> dispatch)
+    {
+        if (registered && !remoteForeground)
+        {
+            var result = nextHook();
+            // Downstream has already seen key-down; it must also receive key-up.
+            if (result != 0) dispatch(false);
+            return result;
+        }
+        dispatch(true);
+        return 1;
+    }
+}
+
 // Two attempts per foreground visit or observed new capture, not per arbitrary click.
-internal sealed class VmwareReconnectBudget
+internal sealed class RemoteReconnectBudget
 {
     private nint _window;
     private int _remaining;

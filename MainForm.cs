@@ -30,7 +30,7 @@ public sealed partial class MainForm : Form
     private int _dragStepIndex = -1;
     private MacroProfile? _recordingProfile;
 
-    private readonly ListBox _profileList = new();
+    private readonly ProfileListBox _profileList = new();
     private readonly TextBox _nameBox = new();
     private readonly TextBox _hotkeyBox = new();
     private readonly ComboBox _triggerTypeBox = new();
@@ -156,6 +156,7 @@ public sealed partial class MainForm : Form
         // rather than scaling an empty form before building the control tree.
         AutoScaleDimensions = new SizeF(96, 96);
         PerformAutoScale();
+        RefreshActivityDisplay();
     }
 
     private void MainForm_KeyDown(object? sender, KeyEventArgs e)
@@ -258,6 +259,7 @@ public sealed partial class MainForm : Form
             SetStatus(UiText.GlobalResumed);
             _trayIcon.Text = UiText.AppTitle;
         }
+        RefreshActivityDisplay();
     }
 
     private void ShowFromTray()
@@ -361,6 +363,7 @@ public sealed partial class MainForm : Form
         {
             _isBinding = false;
         }
+        RefreshActivityDisplay();
     }
 
     private void StepList_MouseDoubleClick(object? sender, MouseEventArgs e)
@@ -597,6 +600,7 @@ public sealed partial class MainForm : Form
         }
         _profileList.ItemHeight = (int)(64 * DeviceDpi / 96f); _stepList.ItemHeight = (int)(48 * DeviceDpi / 96f); _screenMap.Invalidate();
         _profileList.Invalidate();
+        _themeButton.Invalidate(); RefreshActivityDisplay();
         SavePreferences();
         SetStatus(Theme.IsDark ? UiText.DarkTheme : UiText.LightTheme);
     }
@@ -656,7 +660,8 @@ public sealed partial class MainForm : Form
         }
         else if (control is TableLayoutPanel or FlowLayoutPanel or Panel or TabPage or TabControl)
         {
-            Theme.StylePanel(control);
+            if (tag == "Surface") control.BackColor = Theme.CurrentSurface;
+            else Theme.StylePanel(control);
         }
 
         foreach (Control child in control.Controls)
@@ -667,52 +672,59 @@ public sealed partial class MainForm : Form
 
     private async Task CapturePointAfterDelayAsync(bool addClickStep, MacroStepType stepType = MacroStepType.LeftClick)
     {
-        if (_preview || IsCapturing || _executor.IsRunning || CurrentProfile is not { } profile) return;
+        if (_preview || IsCapturing || _executor.IsRunning || _executionCts is not null || CurrentProfile is not { } profile) return;
         using var cts = new CancellationTokenSource(); _captureCts = cts;
+        BeginActivity(ActivityMode.Picking, profile);
         SetCaptureEditing(false);
         if (_hotkeys is not null) _hotkeys.Suspended = true;
         try
         {
-            for (var i = 3; i >= 1; i--) { SetStatus($"{i} 秒后读取鼠标位置；不会实际点击。停止按钮可取消。"); await Task.Delay(1000, cts.Token); }
+            for (var i = 3; i >= 1; i--) { _activityNote = $"{i} 秒后记住点击位置，请把鼠标移到目标上。"; RefreshActivityDisplay(); await Task.Delay(1000, cts.Token); }
             var point = Cursor.Position;
             if (_profiles.Contains(profile))
             {
                 profile.Steps.Add(new() { Type = addClickStep ? stepType : MacroStepType.Move, X = point.X, Y = point.Y });
                 RefreshSteps(); MarkDirty(); SetStatus($"已添加目标 ({point.X}, {point.Y})");
+                FinishActivity($"已添加点击位置 · {profile.Name}", $"位置 ({point.X}, {point.Y})，运行方案时执行点击。");
             }
         }
-        catch (OperationCanceledException) { SetStatus("已取消取点"); }
-        finally { _captureCts = null; SetCaptureEditing(true); if (_hotkeys is not null) _hotkeys.Suspended = false; SaveAll(); }
+        catch (OperationCanceledException) { FinishActivity("已取消取点", "没有添加新的点击位置。"); }
+        finally { _captureCts = null; SetCaptureEditing(true); if (_hotkeys is not null) _hotkeys.Suspended = false; SaveAll(); RefreshActivityDisplay(); }
     }
 
     private void AddDelayStep()
     {
-        AddStep(new MacroStep { Type = MacroStepType.Delay, DelayMs = 500 });
+        if (IsCapturing || CurrentProfile is null) return;
+        var step = new MacroStep { Type = MacroStepType.Delay, DelayMs = 500 };
+        using var dialog = new StepEditDialog(step) { Text = "加延迟", StartPosition = FormStartPosition.CenterParent };
+        if (dialog.ShowDialog(this) == DialogResult.OK) { ApplyStepEdit(step, dialog); AddStep(step); }
     }
 
     private async void ToggleRecording()
     {
         if (_preview || _recorder is null) return;
         if (_recorder.IsRecording || _startingRecording) { StopAll(); return; }
-        if (_executor.IsRunning || _captureCts is not null || CurrentProfile is not { } profile) return;
+        if (_executor.IsRunning || _executionCts is not null || _captureCts is not null || CurrentProfile is not { } profile) return;
         _startingRecording = true; _recordingProfile = profile;
+        BeginActivity(ActivityMode.Countdown, profile);
         SetCaptureEditing(false);
         if (_hotkeys is not null) _hotkeys.Suspended = true;
         using var cts = new CancellationTokenSource(); _captureCts = cts;
         try
         {
-            for (var i = 3; i >= 1; i--) { _recordButton.Text = $"取消倒计时 {i}"; SetStatus($"{i} 秒后录制；Ctrl+Alt+F10 停止。将追加到当前方案。"); await Task.Delay(1000, cts.Token); }
-            _recorder.Start(_recordKeyboardCheck.Checked, Handle);
+            for (var i = 3; i >= 1; i--) { _activityNote = $"{i} 秒后开始，录制鼠标和键盘；Ctrl+Alt+F10 停止。"; RefreshActivityDisplay(); await Task.Delay(1000, cts.Token); }
+            _recorder.Start(excludedWindow: Handle);
             _recordClock.Restart(); _recordUiTimer.Start();
             _profileList.Enabled = false; _workspace.Enabled = true;
-            _recordButton.Text = "■  停止录制"; SetStatus("正在录制操作与真实间隔 · Ctrl+Alt+F10 停止");
+            BeginActivity(ActivityMode.Recording, profile); SetStatus("正在录制鼠标、键盘与操作间隔 · Ctrl+Alt+F10 停止");
         }
-        catch (OperationCanceledException) { _recordingProfile = null; }
-        catch (Exception ex) { _recordingProfile = null; SetStatus(ex.Message); Log(ex.Message); }
+        catch (OperationCanceledException) { _recordingProfile = null; FinishActivity("已取消录制", "没有开始录制。"); }
+        catch (Exception ex) { _recordingProfile = null; FinishActivity("录制未开始", ex.Message, true); SetStatus(ex.Message); Log(ex.Message); }
         finally
         {
             _captureCts = null; _startingRecording = false;
-            if (!_recorder.IsRecording) { SetCaptureEditing(true); _recordButton.Text = "●  录制操作"; if (_hotkeys is not null) _hotkeys.Suspended = false; SaveAll(); }
+            if (!_recorder.IsRecording) { SetCaptureEditing(true); if (_hotkeys is not null) _hotkeys.Suspended = false; SaveAll(); }
+            RefreshActivityDisplay();
         }
     }
 
@@ -800,7 +812,7 @@ public sealed partial class MainForm : Form
 
     private void TestRun()
     {
-        if (_preview || IsCapturing || _diagnosticCheck.Checked) return;
+        if (_preview || IsCapturing || _globalPaused || _diagnosticCheck.Checked) return;
         var profile = CurrentProfile;
         if (profile is null) return;
         if (profile.RepeatCount == 0 && _hotkeys?.StopAvailable != true)
@@ -813,7 +825,7 @@ public sealed partial class MainForm : Form
         }
 
         SetStatus(UiText.Testing(profile.Name));
-        _ = RunWithCancellationAsync(profile);
+        _ = RunAndDrainAsync(profile);
     }
 
     private void SaveAndReload()
@@ -848,6 +860,7 @@ public sealed partial class MainForm : Form
         foreach (var error in errors) Log(error);
         _tips.SetToolTip(_backendLabel, errors.Count == 0 ? "快捷键可以使用" : string.Join("\n", errors));
         SetStatus(errors.Count == 0 ? "就绪" : "部分快捷键不可用，请在运行记录中查看详情");
+        RefreshActivityDisplay();
     }
 
     private void RunMacro(MacroProfile profile)
@@ -894,15 +907,16 @@ public sealed partial class MainForm : Form
         {
             using var cts = new CancellationTokenSource();
             _executionCts = cts;
-            _cancelButton.Enabled = true;
+            _runningProfileId = current.Id;
+            BeginActivity(ActivityMode.Running, current);
             var completed = false;
-            var canceled = false;
-
+            var outcome = $"已完成 · {current.Name}";
+            var detail = "本次运行已结束，等待下一次触发。";
+            var failed = false;
             try
             {
-                // Do not turn the triggering Shift/Ctrl/Alt chord into a modified click.
                 var releaseDeadline = Environment.TickCount64 + 1500;
-                while (AnyModifierHeld())
+                while (!_preview && AnyModifierHeld())
                 {
                     cts.Token.ThrowIfCancellationRequested();
                     if (Environment.TickCount64 >= releaseDeadline) throw new InvalidOperationException("请先松开 Ctrl / Alt / Shift / Win，再运行方案");
@@ -910,79 +924,43 @@ public sealed partial class MainForm : Form
                 }
                 await _executor.RunAsync(current, cts.Token, message => PostToUi(() => Log(message, technical: true)));
                 completed = true;
-                PostToUi(() =>
-                {
-                    SetStatus(UiText.Finished(current.Name));
-                    Log(UiText.Finished(current.Name));
-                });
+                SetStatus(UiText.Finished(current.Name)); Log(UiText.Finished(current.Name));
             }
             catch (OperationCanceledException)
             {
-                canceled = true;
-                PostToUi(() =>
-                {
-                    SetStatus(UiText.Cancelled(current.Name));
-                    Log(UiText.Cancelled(current.Name));
-                });
+                outcome = $"已停止 · {current.Name}"; detail = "已停止本次运行。";
+                SetStatus(UiText.Cancelled(current.Name)); Log(UiText.Cancelled(current.Name));
             }
             catch (Exception ex)
             {
-                PostToUi(() =>
-                {
-                    SetStatus(ex.GetBaseException().Message);
-                    Log($"{UiText.Error}: {ex.GetBaseException().Message}");
-                });
+                failed = true; outcome = $"未完成 · {current.Name}"; detail = ex.GetBaseException().Message;
+                SetStatus(detail); Log($"{UiText.Error}: {detail}");
             }
             finally
             {
-                if (ReferenceEquals(_executionCts, cts))
-                    _executionCts = null;
+                if (ReferenceEquals(_executionCts, cts)) _executionCts = null;
             }
-
-            if (!completed || canceled)
-            {
-                PostToUi(() => _cancelButton.Enabled = true);
-                return;
-            }
-
+            FinishActivity(outcome, detail, failed, completed ? "已完成" : "已停止");
+            if (!completed || _stopRequested) return;
             var chainId = _executor.ConsumeChainMacroId();
-            if (string.IsNullOrWhiteSpace(chainId))
-            {
-                PostToUi(() => _cancelButton.Enabled = true);
-                return;
-            }
-
+            if (string.IsNullOrWhiteSpace(chainId)) return;
             var target = _profiles.FirstOrDefault(p => p.Id == chainId);
             if (target is null || !target.Enabled || target.Id == current.Id)
             {
-                PostToUi(() =>
-                {
-                    SetStatus(UiText.ChainSkipped(current.Name));
-                    Log(UiText.ChainSkipped(current.Name));
-                    _cancelButton.Enabled = true;
-                });
-                return;
+                FinishActivity($"已停止 · {current.Name}", "后续方案不存在、未启用或引用了自身。", true);
+                Log(UiText.ChainSkipped(current.Name)); return;
             }
-
-            PostToUi(() =>
-            {
-                SetStatus(UiText.Chaining(target.Name));
-                Log(UiText.Chaining(target.Name));
-            });
+            Log(UiText.Chaining(target.Name));
             current = CloneProfile(target);
         }
-
-        PostToUi(() =>
-        {
-            SetStatus(UiText.ChainSkipped(current.Name));
-            Log(UiText.ChainSkipped(current.Name));
-            _cancelButton.Enabled = true;
-        });
+        FinishActivity($"已停止 · {current.Name}", "连续调用的方案过多，请检查是否相互循环调用。", true);
+        Log(UiText.ChainSkipped(current.Name));
     }
-
     private void CancelExecution()
     {
         _stopRequested = true;
+        if (_activityMode == ActivityMode.Running)
+        { _activityMode = ActivityMode.Stopping; _activityNote = "正在结束本次运行…"; RefreshActivityDisplay(); }
         _switchRequests.Clear();
         _executionCts?.Cancel();
         _executor.Cancel();
@@ -1025,11 +1003,13 @@ public sealed partial class MainForm : Form
     }
     private void SetStatus(string message)
     {
+        if (_uiDisposed || IsDisposed || Disposing) return;
         _statusLabel.Text = message;
     }
 
     private void Log(string message, bool technical = false)
     {
+        if (_uiDisposed || IsDisposed || Disposing) return;
         var timestamp = DateTime.Now.ToString("HH:mm:ss");
         if (!technical) _logList.Items.Insert(0, $"[{timestamp}] {message}");
         while (_logList.Items.Count > 200)
@@ -1129,454 +1109,5 @@ public sealed partial class MainForm : Form
         }
 
         return false;
-    }
-}
-
-internal sealed class StepEditDialog : Form
-{
-    private readonly ComboBox _typeBox = new();
-    private readonly TableLayoutPanel _fields;
-    private readonly NumericUpDown _recordedDelayBox = new() { Minimum = 0, Maximum = 86400000 };
-    private readonly bool _hasRecordedTiming;
-    private bool _dialogScaled;
-    public int? RecordedDelayMs => _hasRecordedTiming ? (int)_recordedDelayBox.Value : null;
-    private readonly NumericUpDown _xBox = new() { Minimum = -100000, Maximum = 100000 };
-    private readonly NumericUpDown _yBox = new() { Minimum = -100000, Maximum = 100000 };
-    private readonly NumericUpDown _delayBox = new() { Minimum = 0, Maximum = 600000, Increment = 50 };
-    private readonly NumericUpDown _dragEndXBox = new() { Minimum = -100000, Maximum = 100000 };
-    private readonly NumericUpDown _dragEndYBox = new() { Minimum = -100000, Maximum = 100000 };
-    private readonly NumericUpDown _wheelDeltaBox = new() { Minimum = -12000, Maximum = 12000, Increment = 120 };
-    private readonly ComboBox _keyPressBox = new();
-    private readonly ComboBox _keyComboBox = new();
-    private readonly CheckedListBox _modifierCheckList = new();
-    private readonly TextBox _typeTextBox = new();
-    private readonly NumericUpDown _pixelColorBox = new() { Minimum = 0, Maximum = 0xFFFFFF, Hexadecimal = true };
-    private readonly NumericUpDown _pixelToleranceBox = new() { Minimum = 0, Maximum = 255, Increment = 5 };
-    private readonly NumericUpDown _pixelTimeoutBox = new() { Minimum = 0, Maximum = 60000, Increment = 500 };
-    private readonly NumericUpDown _searchWBox = new() { Minimum = 1, Maximum = 3840 };
-    private readonly NumericUpDown _searchHBox = new() { Minimum = 1, Maximum = 2160 };
-    private readonly NumericUpDown _delayMaxBox = new() { Minimum = 0, Maximum = 600000, Increment = 50 };
-    private readonly NumericUpDown _jumpToStepBox = new() { Minimum = 0, Maximum = 9999 };
-    private readonly TextBox _runProgramPathBox = new();
-    private readonly TextBox _runProgramArgsBox = new();
-    private readonly TextBox _soundFilePathBox = new();
-    private readonly TextBox _chainMacroIdBox = new();
-    private readonly Label _xLabel;
-    private readonly Label _yLabel;
-    private readonly Label _delayLabel;
-    private readonly Label _dragEndXLabel;
-    private readonly Label _dragEndYLabel;
-    private readonly Label _wheelLabel;
-    private readonly Label _keyLabel;
-    private readonly Label _modifierLabel;
-    private readonly Label _textLabel;
-    private readonly Label _pixelColorLabel;
-    private readonly Label _pixelToleranceLabel;
-    private readonly Label _pixelTimeoutLabel;
-    private readonly Label _searchWLabel;
-    private readonly Label _searchHLabel;
-    private readonly Label _delayMaxLabel;
-    private readonly Label _jumpToStepLabel;
-    private readonly Label _runProgramPathLabel;
-    private readonly Label _runProgramArgsLabel;
-    private readonly Label _soundFileLabel;
-    private readonly Label _chainMacroIdLabel;
-
-    public MacroStepType StepType => _typeBox.SelectedIndex switch
-    {
-        0 => MacroStepType.Move,
-        1 => MacroStepType.LeftClick,
-        2 => MacroStepType.RightClick,
-        3 => MacroStepType.DoubleClick,
-        4 => MacroStepType.MiddleClick,
-        5 => MacroStepType.Delay,
-        6 => MacroStepType.KeyPress,
-        7 => MacroStepType.KeyCombo,
-        8 => MacroStepType.TypeText,
-        9 => MacroStepType.MouseWheel,
-        10 => MacroStepType.Drag,
-        11 => MacroStepType.MoveRelative,
-        12 => MacroStepType.WaitPixel,
-        13 => MacroStepType.FindPixel,
-        14 => MacroStepType.Screenshot,
-        15 => MacroStepType.RandomDelay,
-        16 => MacroStepType.JumpIfPixel,
-        17 => MacroStepType.RunProgram,
-        18 => MacroStepType.PlaySound,
-        19 => MacroStepType.ChainMacro,
-        _ => MacroStepType.Move
-    };
-
-    public int X => (int)_xBox.Value;
-    public int Y => (int)_yBox.Value;
-    public int DelayMs => (int)_delayBox.Value;
-    public int DragEndX => (int)_dragEndXBox.Value;
-    public int DragEndY => (int)_dragEndYBox.Value;
-    public int WheelDelta => (int)_wheelDeltaBox.Value;
-    public int KeyCode => _keyPressBox.SelectedIndex >= 0 ? (int)(Keys)_keyPressBox.SelectedItem! : 0;
-    public int KeyComboCode => _keyComboBox.SelectedIndex >= 0 ? (int)(Keys)_keyComboBox.SelectedItem! : 0;
-    public uint KeyModifiers
-    {
-        get
-        {
-            uint mods = 0;
-            for (var i = 0; i < _modifierCheckList.Items.Count; i++)
-            {
-                if (_modifierCheckList.GetItemChecked(i))
-                {
-                    mods |= i switch
-                    {
-                        0 => NativeMethods.ModControl,
-                        1 => NativeMethods.ModAlt,
-                        2 => NativeMethods.ModShift,
-                        3 => NativeMethods.ModWin,
-                        _ => 0
-                    };
-                }
-            }
-            return mods;
-        }
-    }
-    public string TextToType => _typeTextBox.Text;
-    public int PixelColor => (int)_pixelColorBox.Value;
-    public int PixelTolerance => (int)_pixelToleranceBox.Value;
-    public int PixelTimeoutMs => (int)_pixelTimeoutBox.Value;
-    public int SearchWidth => (int)_searchWBox.Value;
-    public int SearchHeight => (int)_searchHBox.Value;
-    public int DelayMsMax => (int)_delayMaxBox.Value;
-    public int JumpToStepIndex => (int)_jumpToStepBox.Value - 1;
-    public string RunProgramPath => _runProgramPathBox.Text;
-    public string RunProgramArgs => _runProgramArgsBox.Text;
-    public string SoundFilePath => _soundFilePathBox.Text;
-    public string ChainMacroId => _chainMacroIdBox.Text;
-
-    public StepEditDialog(MacroStep step)
-    {
-        Text = UiText.EditStepTitle;
-        _hasRecordedTiming = step.RecordedDelayMs.HasValue;
-        Size = new Size(540, 620);
-        Font = Theme.BodyFont;
-        Theme.ApplyToForm(this);
-        FormBorderStyle = FormBorderStyle.FixedDialog;
-        MaximizeBox = false;
-        MinimizeBox = false;
-        KeyPreview = true;
-        AutoScroll = true;
-
-        var root = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 1, Padding = new Padding(16) };
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); root.RowStyles.Add(new RowStyle(SizeType.Absolute, 56));
-        Controls.Add(root);
-        var scroll = new Panel { Dock = DockStyle.Fill, AutoScroll = true };
-        root.Controls.Add(scroll, 0, 0);
-        var panel = _fields = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2, RowCount = 22 };
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 138));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        for (var i = 0; i < 22; i++) panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        scroll.Controls.Add(panel);
-
-        _typeBox.DropDownStyle = ComboBoxStyle.DropDownList;
-        _typeBox.Items.AddRange([
-            UiText.TypeMove, UiText.TypeLeftClick, UiText.TypeRightClick,
-            UiText.TypeDoubleClick, UiText.TypeMiddleClick, UiText.TypeDelay,
-            UiText.TypeKeyPress, UiText.TypeKeyCombo, UiText.TypeTypeText,
-            UiText.TypeMouseWheel, UiText.TypeDrag, UiText.TypeMoveRelative,
-            UiText.TypeWaitPixel, UiText.TypeFindPixel, UiText.TypeScreenshot,
-            UiText.TypeRandomDelay, UiText.TypeJumpIfPixel, UiText.TypeRunProgram,
-            UiText.TypePlaySound, UiText.TypeChainMacro
-        ]);
-        _typeBox.SelectedIndex = step.Type switch
-        {
-            MacroStepType.Move => 0,
-            MacroStepType.LeftClick => 1,
-            MacroStepType.RightClick => 2,
-            MacroStepType.DoubleClick => 3,
-            MacroStepType.MiddleClick => 4,
-            MacroStepType.Delay => 5,
-            MacroStepType.KeyPress => 6,
-            MacroStepType.KeyCombo => 7,
-            MacroStepType.TypeText => 8,
-            MacroStepType.MouseWheel => 9,
-            MacroStepType.Drag => 10,
-            MacroStepType.MoveRelative => 11,
-            MacroStepType.WaitPixel => 12,
-            MacroStepType.FindPixel => 13,
-            MacroStepType.Screenshot => 14,
-            MacroStepType.RandomDelay => 15,
-            MacroStepType.JumpIfPixel => 16,
-            MacroStepType.RunProgram => 17,
-            MacroStepType.PlaySound => 18,
-            MacroStepType.ChainMacro => 19,
-            _ => 0
-        };
-        _typeBox.Dock = DockStyle.Fill;
-
-        Theme.StyleComboBox(_typeBox);
-
-        _xBox.Value = Math.Min(_xBox.Maximum, Math.Max(_xBox.Minimum, step.X));
-        _xBox.Dock = DockStyle.Fill;
-        Theme.StyleNumericUpDown(_xBox);
-
-        _yBox.Value = Math.Min(_yBox.Maximum, Math.Max(_yBox.Minimum, step.Y));
-        _yBox.Dock = DockStyle.Fill;
-        Theme.StyleNumericUpDown(_yBox);
-
-        _delayBox.Value = Math.Min(_delayBox.Maximum, Math.Max(_delayBox.Minimum, step.DelayMs));
-        _delayBox.Dock = DockStyle.Fill;
-        Theme.StyleNumericUpDown(_delayBox);
-
-        _dragEndXBox.Value = Math.Min(_dragEndXBox.Maximum, Math.Max(_dragEndXBox.Minimum, step.DragEndX));
-        _dragEndXBox.Dock = DockStyle.Fill;
-        Theme.StyleNumericUpDown(_dragEndXBox);
-
-        _dragEndYBox.Value = Math.Min(_dragEndYBox.Maximum, Math.Max(_dragEndYBox.Minimum, step.DragEndY));
-        _dragEndYBox.Dock = DockStyle.Fill;
-        Theme.StyleNumericUpDown(_dragEndYBox);
-
-        _wheelDeltaBox.Value = Math.Min(_wheelDeltaBox.Maximum, Math.Max(_wheelDeltaBox.Minimum, step.WheelDelta));
-        _wheelDeltaBox.Dock = DockStyle.Fill;
-        Theme.StyleNumericUpDown(_wheelDeltaBox);
-
-        _keyPressBox.DropDownStyle = ComboBoxStyle.DropDownList;
-        _keyPressBox.Dock = DockStyle.Fill;
-        var keyNames = new List<Keys>();
-        for (var k = (int)Keys.A; k <= (int)Keys.Z; k++) keyNames.Add((Keys)k);
-        for (var k = (int)Keys.D0; k <= (int)Keys.D9; k++) keyNames.Add((Keys)k);
-        keyNames.AddRange([Keys.F1, Keys.F2, Keys.F3, Keys.F4, Keys.F5, Keys.F6, Keys.F7, Keys.F8, Keys.F9, Keys.F10, Keys.F11, Keys.F12,
-            Keys.Escape, Keys.Tab, Keys.Space, Keys.Enter, Keys.Back, Keys.Delete, Keys.Insert,
-            Keys.Home, Keys.End, Keys.PageUp, Keys.PageDown, Keys.Up, Keys.Down, Keys.Left, Keys.Right]);
-        for (var k = (int)Keys.F13; k <= (int)Keys.F24; k++) keyNames.Add((Keys)k);
-        if (step.KeyCode > 0 && !keyNames.Contains((Keys)step.KeyCode)) keyNames.Add((Keys)step.KeyCode);
-        _keyPressBox.Items.AddRange(keyNames.Cast<object>().ToArray());
-        var keyIdx = keyNames.IndexOf((Keys)step.KeyCode);
-        _keyPressBox.SelectedIndex = keyIdx >= 0 ? keyIdx : 0;
-        Theme.StyleComboBox(_keyPressBox);
-
-        _keyComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
-        _keyComboBox.Dock = DockStyle.Fill;
-        _keyComboBox.Items.AddRange(keyNames.Cast<object>().ToArray());
-        var comboKeyIdx = keyNames.IndexOf((Keys)step.KeyCode);
-        _keyComboBox.SelectedIndex = comboKeyIdx >= 0 ? comboKeyIdx : 0;
-        Theme.StyleComboBox(_keyComboBox);
-
-        _modifierCheckList.Dock = DockStyle.Fill;
-        _modifierCheckList.Items.AddRange(["Ctrl", "Alt", "Shift", "Win"]);
-        _modifierCheckList.CheckOnClick = true;
-        _modifierCheckList.Height = 94;
-        if ((step.KeyModifiers & NativeMethods.ModControl) != 0) _modifierCheckList.SetItemChecked(0, true);
-        if ((step.KeyModifiers & NativeMethods.ModAlt) != 0) _modifierCheckList.SetItemChecked(1, true);
-        if ((step.KeyModifiers & NativeMethods.ModShift) != 0) _modifierCheckList.SetItemChecked(2, true);
-        if ((step.KeyModifiers & NativeMethods.ModWin) != 0) _modifierCheckList.SetItemChecked(3, true);
-        _modifierCheckList.BackColor = Theme.CurrentInputBg;
-        _modifierCheckList.ForeColor = Theme.CurrentTextPrimary;
-        _modifierCheckList.BorderStyle = BorderStyle.FixedSingle;
-        _modifierCheckList.Font = Theme.BodyFont;
-
-        _typeTextBox.Dock = DockStyle.Fill;
-        _typeTextBox.Text = step.TextToType;
-        Theme.StyleTextBox(_typeTextBox);
-
-        _pixelColorBox.Value = Math.Min(_pixelColorBox.Maximum, Math.Max(_pixelColorBox.Minimum, step.PixelColor));
-        _pixelColorBox.Dock = DockStyle.Fill;
-        Theme.StyleNumericUpDown(_pixelColorBox);
-
-        _pixelToleranceBox.Value = Math.Min(_pixelToleranceBox.Maximum, Math.Max(_pixelToleranceBox.Minimum, step.PixelTolerance));
-        _pixelToleranceBox.Dock = DockStyle.Fill;
-        Theme.StyleNumericUpDown(_pixelToleranceBox);
-
-        _pixelTimeoutBox.Value = Math.Min(_pixelTimeoutBox.Maximum, Math.Max(_pixelTimeoutBox.Minimum, step.PixelTimeoutMs));
-        _pixelTimeoutBox.Dock = DockStyle.Fill;
-        Theme.StyleNumericUpDown(_pixelTimeoutBox);
-
-        _searchWBox.Value = Math.Min(_searchWBox.Maximum, Math.Max(_searchWBox.Minimum, step.SearchWidth));
-        _searchWBox.Dock = DockStyle.Fill;
-        Theme.StyleNumericUpDown(_searchWBox);
-
-        _searchHBox.Value = Math.Min(_searchHBox.Maximum, Math.Max(_searchHBox.Minimum, step.SearchHeight));
-        _searchHBox.Dock = DockStyle.Fill;
-        Theme.StyleNumericUpDown(_searchHBox);
-
-        _delayMaxBox.Value = Math.Min(_delayMaxBox.Maximum, Math.Max(_delayMaxBox.Minimum, step.DelayMsMax));
-        _delayMaxBox.Dock = DockStyle.Fill;
-        Theme.StyleNumericUpDown(_delayMaxBox);
-
-        _jumpToStepBox.Value = Math.Min(_jumpToStepBox.Maximum, Math.Max(_jumpToStepBox.Minimum, Math.Max(0, step.JumpToStepIndex + 1)));
-        _jumpToStepBox.Dock = DockStyle.Fill;
-        Theme.StyleNumericUpDown(_jumpToStepBox);
-
-        _runProgramPathBox.Dock = DockStyle.Fill;
-        _runProgramPathBox.Text = step.RunProgramPath;
-        Theme.StyleTextBox(_runProgramPathBox);
-
-        _runProgramArgsBox.Dock = DockStyle.Fill;
-        _runProgramArgsBox.Text = step.RunProgramArgs;
-        Theme.StyleTextBox(_runProgramArgsBox);
-
-        _soundFilePathBox.Dock = DockStyle.Fill;
-        _soundFilePathBox.Text = step.SoundFilePath;
-        Theme.StyleTextBox(_soundFilePathBox);
-
-        _chainMacroIdBox.Dock = DockStyle.Fill;
-        _chainMacroIdBox.Text = step.ChainMacroId;
-        Theme.StyleTextBox(_chainMacroIdBox);
-
-        var typeLabel = CreateDialogLabel(UiText.StepType);
-        _xLabel = CreateDialogLabel(UiText.X);
-        _yLabel = CreateDialogLabel(UiText.Y);
-        _delayLabel = CreateDialogLabel(UiText.DelayMs);
-        _dragEndXLabel = CreateDialogLabel(UiText.DragEndX);
-        _dragEndYLabel = CreateDialogLabel(UiText.DragEndY);
-        _wheelLabel = CreateDialogLabel(UiText.WheelDelta);
-        _keyLabel = CreateDialogLabel(UiText.KeyToPress);
-        _modifierLabel = CreateDialogLabel(UiText.Modifiers);
-        _textLabel = CreateDialogLabel(UiText.TextToType);
-        _pixelColorLabel = CreateDialogLabel(UiText.PixelColor);
-        _pixelToleranceLabel = CreateDialogLabel(UiText.PixelTolerance);
-        _pixelTimeoutLabel = CreateDialogLabel(UiText.PixelTimeout);
-        _searchWLabel = CreateDialogLabel(UiText.SearchWidth);
-        _searchHLabel = CreateDialogLabel(UiText.SearchHeight);
-        _delayMaxLabel = CreateDialogLabel(UiText.DelayMax);
-        _jumpToStepLabel = CreateDialogLabel(UiText.JumpToStep);
-        _runProgramPathLabel = CreateDialogLabel(UiText.ProgramPath);
-        _runProgramArgsLabel = CreateDialogLabel(UiText.ProgramArgs);
-        _soundFileLabel = CreateDialogLabel(UiText.SoundFile);
-        _chainMacroIdLabel = CreateDialogLabel(UiText.ChainMacroId);
-
-        panel.Controls.Add(typeLabel, 0, 0);
-        panel.Controls.Add(_typeBox, 1, 0);
-        panel.Controls.Add(_xLabel, 0, 1);
-        panel.Controls.Add(_xBox, 1, 1);
-        panel.Controls.Add(_yLabel, 0, 2);
-        panel.Controls.Add(_yBox, 1, 2);
-        panel.Controls.Add(_delayLabel, 0, 3);
-        panel.Controls.Add(_delayBox, 1, 3);
-        panel.Controls.Add(_dragEndXLabel, 0, 4);
-        panel.Controls.Add(_dragEndXBox, 1, 4);
-        panel.Controls.Add(_dragEndYLabel, 0, 5);
-        panel.Controls.Add(_dragEndYBox, 1, 5);
-        panel.Controls.Add(_wheelLabel, 0, 6);
-        panel.Controls.Add(_wheelDeltaBox, 1, 6);
-        panel.Controls.Add(_keyLabel, 0, 7);
-        var keyPanel = new Panel { Dock = DockStyle.Fill, Height = 34 };
-        keyPanel.Controls.Add(_keyPressBox); keyPanel.Controls.Add(_keyComboBox);
-        panel.Controls.Add(keyPanel, 1, 7);
-        panel.Controls.Add(_modifierLabel, 0, 8);
-        panel.Controls.Add(_modifierCheckList, 1, 8);
-        panel.Controls.Add(_textLabel, 0, 9);
-        panel.Controls.Add(_typeTextBox, 1, 9);
-        panel.Controls.Add(_pixelColorLabel, 0, 10);
-        panel.Controls.Add(_pixelColorBox, 1, 10);
-        panel.Controls.Add(_pixelToleranceLabel, 0, 11);
-        panel.Controls.Add(_pixelToleranceBox, 1, 11);
-        panel.Controls.Add(_pixelTimeoutLabel, 0, 12);
-        panel.Controls.Add(_pixelTimeoutBox, 1, 12);
-        panel.Controls.Add(_searchWLabel, 0, 13);
-        panel.Controls.Add(_searchWBox, 1, 13);
-        panel.Controls.Add(_searchHLabel, 0, 14);
-        panel.Controls.Add(_searchHBox, 1, 14);
-        panel.Controls.Add(_delayMaxLabel, 0, 15);
-        panel.Controls.Add(_delayMaxBox, 1, 15);
-        panel.Controls.Add(_jumpToStepLabel, 0, 16);
-        panel.Controls.Add(_jumpToStepBox, 1, 16);
-        panel.Controls.Add(_runProgramPathLabel, 0, 17);
-        panel.Controls.Add(_runProgramPathBox, 1, 17);
-        panel.Controls.Add(_runProgramArgsLabel, 0, 18);
-        panel.Controls.Add(_runProgramArgsBox, 1, 18);
-        panel.Controls.Add(_soundFileLabel, 0, 19);
-        panel.Controls.Add(_soundFilePathBox, 1, 19);
-        panel.Controls.Add(_chainMacroIdLabel, 0, 20);
-        panel.Controls.Add(_chainMacroIdBox, 1, 20);
-
-        var buttonPanel = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(0, 6, 0, 0) };
-        Theme.StylePanel(buttonPanel);
-
-        var cancelBtn = new Button { Text = UiText.Cancel, Width = 80, Height = 32 };
-        Theme.StyleButton(cancelBtn);
-        cancelBtn.Click += (_, _) => { DialogResult = DialogResult.Cancel; Close(); };
-
-        var okBtn = new Button { Text = UiText.Confirm, Width = 80, Height = 32 };
-        Theme.StyleAccentButton(okBtn);
-        okBtn.Click += (_, _) => { DialogResult = DialogResult.OK; Close(); };
-
-        buttonPanel.Controls.Add(cancelBtn);
-        buttonPanel.Controls.Add(okBtn);
-        var timingLabel = CreateDialogLabel("录制间隔（毫秒）");
-        _recordedDelayBox.Value = step.RecordedDelayMs ?? 0;
-        _recordedDelayBox.Dock = DockStyle.Fill; Theme.StyleNumericUpDown(_recordedDelayBox);
-        timingLabel.Visible = _recordedDelayBox.Visible = _hasRecordedTiming;
-        panel.Controls.Add(timingLabel, 0, 21); panel.Controls.Add(_recordedDelayBox, 1, 21);
-        root.Controls.Add(buttonPanel, 0, 1);
-        foreach (Control field in panel.Controls) field.Margin = new Padding(4, 7, 4, 7);
-        _typeBox.SelectedIndexChanged += (_, _) => UpdateFieldVisibility();
-
-        AcceptButton = okBtn;
-        CancelButton = cancelBtn;
-
-        UpdateFieldVisibility();
-        AutoScaleMode = AutoScaleMode.Dpi; AutoScaleDimensions = new SizeF(96, 96); PerformAutoScale();
-        _dialogScaled = true;
-    }
-
-    private void UpdateFieldVisibility()
-    {
-        var type = StepType;
-        var isClick = type is MacroStepType.LeftClick or MacroStepType.RightClick or MacroStepType.DoubleClick or MacroStepType.MiddleClick;
-        var isMove = type is MacroStepType.Move or MacroStepType.MoveRelative;
-        var isDrag = type == MacroStepType.Drag;
-        var isDelay = type == MacroStepType.Delay;
-        var isWheel = type == MacroStepType.MouseWheel;
-        var isKey = type is MacroStepType.KeyPress or MacroStepType.KeyCombo;
-        var isCombo = type == MacroStepType.KeyCombo;
-        var isTypeText = type == MacroStepType.TypeText;
-        var isPixel = type is MacroStepType.WaitPixel or MacroStepType.FindPixel or MacroStepType.JumpIfPixel;
-        var isFindPixel = type == MacroStepType.FindPixel;
-        var isScreenshot = type == MacroStepType.Screenshot;
-        var isRandomDelay = type == MacroStepType.RandomDelay;
-        var isJumpIfPixel = type == MacroStepType.JumpIfPixel;
-        var isRunProgram = type == MacroStepType.RunProgram;
-        var isPlaySound = type == MacroStepType.PlaySound;
-        var isChainMacro = type == MacroStepType.ChainMacro;
-
-        _xLabel.Visible = _xBox.Visible = isClick || isMove || isDrag || isPixel || isScreenshot;
-        _yLabel.Visible = _yBox.Visible = isClick || isMove || isDrag || isPixel || isScreenshot;
-        _delayLabel.Visible = _delayBox.Visible = isDelay || isRandomDelay;
-        _dragEndXLabel.Visible = _dragEndXBox.Visible = isDrag;
-        _dragEndYLabel.Visible = _dragEndYBox.Visible = isDrag;
-        _wheelLabel.Visible = _wheelDeltaBox.Visible = isWheel;
-        _keyLabel.Visible = isKey || isCombo;
-        _keyPressBox.Visible = isKey && !isCombo;
-        _keyComboBox.Visible = isCombo;
-        _modifierLabel.Visible = _modifierCheckList.Visible = isCombo;
-        _textLabel.Visible = _typeTextBox.Visible = isTypeText;
-        _pixelColorLabel.Visible = _pixelColorBox.Visible = isPixel;
-        _pixelToleranceLabel.Visible = _pixelToleranceBox.Visible = isPixel;
-        _pixelTimeoutLabel.Visible = _pixelTimeoutBox.Visible = isPixel;
-        _searchWLabel.Visible = _searchWBox.Visible = isFindPixel || isScreenshot;
-        _searchHLabel.Visible = _searchHBox.Visible = isFindPixel || isScreenshot;
-        _delayMaxLabel.Visible = _delayMaxBox.Visible = isRandomDelay;
-        _jumpToStepLabel.Visible = _jumpToStepBox.Visible = isJumpIfPixel;
-        _runProgramPathLabel.Visible = _runProgramPathBox.Visible = isRunProgram;
-        _runProgramArgsLabel.Visible = _runProgramArgsBox.Visible = isRunProgram;
-        _soundFileLabel.Visible = _soundFilePathBox.Visible = isPlaySound;
-        _chainMacroIdLabel.Visible = _chainMacroIdBox.Visible = isChainMacro;
-        if (_fields is not null)
-        {
-            var visibleRows = new[] { true, isClick || isMove || isDrag || isPixel || isScreenshot,
-                isClick || isMove || isDrag || isPixel || isScreenshot, isDelay || isRandomDelay,
-                isDrag, isDrag, isWheel, isKey, isCombo, isTypeText, isPixel, isPixel,
-                isPixel, isFindPixel || isScreenshot, isFindPixel || isScreenshot, isRandomDelay,
-                isJumpIfPixel, isRunProgram, isRunProgram, isPlaySound, isChainMacro, _hasRecordedTiming };
-            for (var i = 0; i < visibleRows.Length; i++)
-            {
-                _fields.RowStyles[i].SizeType = SizeType.Absolute;
-                _fields.RowStyles[i].Height = visibleRows[i] ? (i == 8 ? 108 : 48) * (_dialogScaled ? DeviceDpi / 96f : 1) : 0;
-            }
-        }
-    }
-
-    private static Label CreateDialogLabel(string text)
-    {
-        var label = new Label { Text = text, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
-        Theme.StyleLabel(label);
-        return label;
     }
 }

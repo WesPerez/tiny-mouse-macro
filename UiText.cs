@@ -6,13 +6,13 @@ internal static class UiText
     public const string X = "X 坐标";
     public const string Y = "Y 坐标";
     public const string DelayMs = "等待毫秒";
-    public const string StepType = "步骤类型";
+    public const string StepType = "动作";
     public const string TypeMove = "移动";
     public const string TypeLeftClick = "左键点击";
     public const string TypeRightClick = "右键点击";
     public const string TypeDoubleClick = "双击";
     public const string TypeMiddleClick = "中键点击";
-    public const string TypeDelay = "等待";
+    public const string TypeDelay = "延迟";
     public const string TypeKeyPress = "按键";
     public const string TypeKeyCombo = "组合键";
     public const string TypeTypeText = "输入文本";
@@ -38,7 +38,7 @@ internal static class UiText
     public const string RightClickStepDisplay = "右键点击";
     public const string DoubleClickStepDisplay = "左键双击";
     public const string MiddleClickStepDisplay = "中键点击";
-    public const string DelayStepDisplay = "等待";
+    public const string DelayStepDisplay = "延迟";
     public const string KeyPressStepDisplay = "按键";
     public const string KeyComboStepDisplay = "组合键";
     public const string TypeTextStepDisplay = "输入文本";

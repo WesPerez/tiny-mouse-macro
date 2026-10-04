@@ -10,7 +10,7 @@ public sealed partial class MainForm
         while (_recordingProfile is not null && _recordQueue.TryDequeue(out var step))
         { _recordingProfile.Steps.Add(step); count++; }
         if (count > 0) { _stepsSource.ResetBindings(false); _stepList.SelectedIndex = _stepList.Items.Count - 1; MarkDirty(); }
-        if (_recorder?.IsRecording == true) _recordButton.Text = $"■  停止 {_recordClock.Elapsed:mm\\:ss}";
+        if (_recorder?.IsRecording == true) RefreshActivityDisplay();
         if (_recorder?.LimitReached == true && _recorder.IsRecording)
         { StopRecording(); SetStatus("录制已达到 100,000 步，已自动停止并保存。"); }
     }
@@ -18,10 +18,11 @@ public sealed partial class MainForm
     {
         if (_recorder?.IsRecording != true) return;
         _recorder.Stop(); _recordUiTimer.Stop(); FlushRecording(); _recordClock.Stop();
-        _recordingProfile = null; SetCaptureEditing(true); _recordButton.Text = "●  录制操作";
+        var profileName = _recordingProfile?.Name ?? "当前方案";
+        _recordingProfile = null; SetCaptureEditing(true);
         if (_hotkeys is not null) _hotkeys.Suspended = false;
-        if (SaveAll()) SetStatus("录制已停止，操作与时间间隔已保存");
-        else SetStatus("录制已停止，但保存失败；内容仍在内存中，请按 Ctrl+S 重试。");
+        if (SaveAll()) { SetStatus("录制已停止，操作与时间间隔已保存"); FinishActivity($"录制已保存 · {profileName}", "鼠标、键盘和操作间隔已追加到方案。", badge: "已保存"); }
+        else { SetStatus("录制已停止，但保存失败；内容仍在内存中，请按 Ctrl+S 重试。"); FinishActivity($"录制已停止 · {profileName}", "保存失败，内容仍在内存中；请按 Ctrl+S 重试。", true); }
     }
     private void StopAll()
     { _captureCts?.Cancel(); CancelExecution(); StopRecording(); if (!IsCapturing) SetCaptureEditing(true); SaveAll(); }
@@ -40,13 +41,14 @@ public sealed partial class MainForm
     {
         foreach (var c in new Control[] { _nameBox, _searchBox, _profileList, _triggerTypeBox, _hotkeyBox,
             _hookKeyBox, _mouseButtonBox, _repeatCountBox, _repeatIntervalBox, _speedBox, _scheduleIntervalBox,
-            _enabledCheckBox, _targetWindowBox, _recordKeyboardCheck }) c.Enabled = enabled;
+            _enabledCheckBox, _targetWindowBox }) c.Enabled = enabled;
     }
     protected override void Dispose(bool disposing)
     {
         if (disposing)
         {
-            _saveTimer.Dispose(); _recordUiTimer.Dispose(); _scheduleTimer.Dispose(); _positionTimer.Dispose();
+            _uiDisposed = true;
+            _saveTimer.Dispose(); _recordUiTimer.Dispose(); _scheduleTimer.Dispose(); _positionTimer.Dispose(); _activityTimer.Dispose();
             _tips.Dispose(); _trayIcon.ContextMenuStrip?.Dispose(); _trayIcon.Dispose();
             _optionsPanel.Dispose(); _diagnosticsPanel.Dispose();
             _hotkeys?.Dispose(); _recorder?.Dispose();

@@ -20,7 +20,7 @@ public sealed class RecorderService : IDisposable
     public bool LimitReached { get; private set; }
     public bool IsRecording => _recording;
     public event Action<MacroStep>? StepRecorded;
-    public void Start(bool keyboard = false, nint excludedWindow = 0)
+    public void Start(bool keyboard = true, nint excludedWindow = 0)
     {
         _thread.Invoke(() =>
         {

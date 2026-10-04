@@ -13,6 +13,8 @@ public sealed class MacroExecutor
     private bool _isRunning;
     private CancellationTokenSource? _loopCts;
     private string? _pendingChainMacroId;
+    private MacroProgress? _progress;
+    public MacroProgress? Progress => Volatile.Read(ref _progress);
     private readonly IPlaybackDesktop _desktop;
     private readonly IPlaybackInput _input;
     public MacroExecutor() : this(new WindowsPlaybackDesktop(), new WindowsPlaybackInput()) { }
@@ -58,6 +60,7 @@ public sealed class MacroExecutor
             _loopCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             _isRunning = true;
             _pendingChainMacroId = null;
+            Volatile.Write(ref _progress, null);
         }
 
         var runCts = _loopCts!;
@@ -111,6 +114,7 @@ public sealed class MacroExecutor
                 }
 
                 var step = steps[index];
+                Volatile.Write(ref _progress, new MacroProgress(iteration + 1, repeatCount, index + 1, steps.Length, step.Display));
                 if (step.RecordedDelayMs is int recordedDelay)
                 {
                     if (!previousRecorded) targetTimeMs = timing.Elapsed.TotalMilliseconds;
@@ -479,3 +483,5 @@ public sealed class MacroExecutor
         public static StepResult Jump(int index) => new(index);
     }
 }
+
+public sealed record MacroProgress(int Iteration, int RepeatCount, int Step, int StepCount, string Action);

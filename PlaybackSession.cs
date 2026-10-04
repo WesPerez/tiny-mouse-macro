@@ -205,7 +205,7 @@ internal sealed class WindowsPlaybackDesktop : IPlaybackDesktop
         try
         {
             using var process = Process.GetProcessById(id);
-            return DesktopSwitcher.IsVmwareProcess(process.ProcessName) || process.ProcessName.Equals("GameViewer", StringComparison.OrdinalIgnoreCase);
+            return DesktopSwitcher.IsRemoteProcess(process.ProcessName);
         }
         catch (ArgumentException) { return false; }
         catch (InvalidOperationException) { return false; }

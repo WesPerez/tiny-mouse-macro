@@ -32,8 +32,39 @@ internal static class SelfTest
             Check("autorepeat suppressed", state.Update((int)Keys.F13, true) && !state.Update((int)Keys.F13, true));
             state.Update((int)Keys.F13, false); Check("next physical press allowed", state.Update((int)Keys.F13, true));
             var dedup = new TriggerDeduplicator();
-            var reconnect = new VmwareReconnectBudget();
-            Check("no rehook outside VMware", !reconnect.Request());
+            var forwarded = 0; var dispatched = 0; var swallowFollowing = false;
+            nint Forward() { forwarded++; return 0; }
+            void Dispatch(bool swallow) { dispatched++; swallowFollowing = swallow; }
+            Check("ordinary registered shortcut keeps Windows hotkey route",
+                HotkeyHookRoute.Handle(true, false, Forward, Dispatch) == 0 && forwarded == 1 && dispatched == 0);
+            foreach (var remoteProcess in new[] { "GameViewer", "GAMEVIEWER", "vmware", "vmware-vmx", "mksSandbox" })
+            {
+                var before = dispatched;
+                Check(remoteProcess + " registered shortcut dispatches before remote interception",
+                    HotkeyHookRoute.Handle(true, DesktopSwitcher.IsRemoteProcess(remoteProcess), Forward, Dispatch) == 1 &&
+                    forwarded == 1 && dispatched == before + 1 && swallowFollowing);
+            }
+            Check("unrelated process is not a captured console", !DesktopSwitcher.IsRemoteProcess("notepad") &&
+                !DesktopSwitcher.IsRemoteProcess("GameViewerHelper") && !DesktopSwitcher.IsRemoteProcess("vmware-tools"));
+            var calls = dispatched;
+            Check("hook-only binding still dispatches directly", HotkeyHookRoute.Handle(false, false, Forward, Dispatch) == 1 &&
+                forwarded == 1 && dispatched == calls + 1 && swallowFollowing);
+            calls = dispatched;
+            Check("interception before remote detection dispatches once and preserves hook result",
+                HotkeyHookRoute.Handle(true, false, () => { forwarded++; return 7; }, Dispatch) == 7 &&
+                forwarded == 2 && dispatched == calls + 1);
+            Check("downstream interception must still receive key-up", !swallowFollowing);
+            var routed = new TriggerDeduplicator(); var runs = 0;
+            void RoutedDispatch(bool swallow) { if (routed.Accept("return", "hook", 500)) runs++; }
+            HotkeyHookRoute.Handle(true, true, Forward, RoutedDispatch);
+            if (routed.Accept("return", "raw", 500)) runs++;
+            if (routed.Accept("return", "system", 501)) runs++;
+            Check("remote direct path plus raw and system notifications run once", runs == 1 && forwarded == 2);
+            if (routed.Accept("return", "hook", 600)) runs++;
+            Check("next remote press can run again", runs == 2);
+
+            var reconnect = new RemoteReconnectBudget();
+            Check("no rehook outside remote consoles", !reconnect.Request());
             reconnect.ObserveForeground(123);
             Check("VMware entry schedules one rehook", reconnect.Request() && !reconnect.Request() && reconnect.Consume());
             Check("one later grab click can reconnect", reconnect.Request() && reconnect.Consume());
@@ -49,6 +80,11 @@ internal static class SelfTest
             Check("continuous capture cannot reset budget", !reconnect.ObserveCapture(true) && !reconnect.Request());
             reconnect.ObserveCapture(false);
             Check("same window recapture can recover", reconnect.ObserveCapture(true) && reconnect.Request());
+            reconnect.ObserveForeground(456);
+            Check("VMware to UU transition drops old pending request", !reconnect.Consume());
+            Check("UU visit has its own recovery budget", reconnect.Request() && reconnect.Consume() && reconnect.Request() && reconnect.Consume() && !reconnect.Request());
+            reconnect.ObserveForeground(0);
+            Check("returning from UU stops recovery", !reconnect.Request() && !reconnect.Consume());
 
             PlaybackSelfTest.Run(Check);
             var targetPoint = new Point(1500, 300); var moves = 0; var reads = 0;
@@ -154,6 +190,7 @@ internal static class SelfTest
             var timer = System.Diagnostics.Stopwatch.StartNew();
             executor.RunAsync(new() { Steps = [new() { Type = MacroStepType.Delay, DelayMs = 0, RecordedDelayMs = 100 }, new() { Type = MacroStepType.Delay, DelayMs = 0, RecordedDelayMs = 150 }] }).GetAwaiter().GetResult();
             Check("recorded playback timing", timer.ElapsedMilliseconds >= 230 && timer.ElapsedMilliseconds < 600);
+            Check("progress tracks actual executor step and iteration", executor.Progress is { Step: 2, StepCount: 2, Iteration: 1, RepeatCount: 1 });
             var fixture = new List<MacroProfile>
             {
                 new() { Name = "上 · 虚拟机", Hotkey = "Shift+Z", Steps = [new() { Type = MacroStepType.LeftClick, X = 2272, Y = -457 }] },
@@ -171,17 +208,36 @@ internal static class SelfTest
                     Check($"layout {size.Width} tab {tab}", form.ValidatePreviewLayout(out var error));
                 }
                 form.VerifyPreviewInteractions(Check);
+                form.VerifyExecutionLifecycle(Check);
+                form.PreviewRunning();
+                form.RenderPreview(Path.Combine(output, $"ui-{size.Width}-running.png"), 0);
+                form.PreviewRecording();
+                form.RenderPreview(Path.Combine(output, $"ui-{size.Width}-recording.png"), 0);
+                form.PreviewFinished();
                 form.TogglePreviewTheme();
                 form.RenderPreview(Path.Combine(output, $"ui-{size.Width}-dark.png"), 0);
                 form.TogglePreviewTheme();
             }
             for (var type = 0; type <= 19; type++)
             {
-                using var dialog = new StepEditDialog(new() { Type = (MacroStepType)type, KeyCode = (int)Keys.F13, RecordedDelayMs = 640 });
+                using var dialog = new StepEditDialog(new() { Type = (MacroStepType)type, KeyCode = (int)Keys.F13, KeyModifiers = 3, DelayMs = 1250, DelayMsMax = 2750, RecordedDelayMs = 640 });
                 CreateHandles(dialog); dialog.PerformLayout();
                 Check($"step editor preserves type {type}", (int)dialog.StepType == type);
                 if (type == (int)MacroStepType.KeyCombo) Check("combo selector retains F13 and is parented", dialog.KeyComboCode == (int)Keys.F13 && FindField<ComboBox>(dialog, "_keyComboBox").Parent is not null);
-                if (type is 5 or 7 or 13)
+                if (type == (int)MacroStepType.KeyCombo) Check("compact modifiers retain Ctrl and Alt", dialog.KeyModifiers == 3);
+                if (type == (int)MacroStepType.Delay) Check("seconds editor preserves millisecond precision", dialog.DelayMs == 1250 && dialog.DelayMsMax == 2750 && dialog.RecordedDelayMs == 640);
+                if (type == (int)MacroStepType.KeyPress)
+                {
+                    var selector = FindField<ComboBox>(dialog, "_keyPressBox");
+                    selector.SelectedItem = Keys.Menu;
+                    Check("single Alt is selectable and clearly named", dialog.KeyCode == (int)Keys.Menu && selector.GetItemText(selector.SelectedItem) == "Alt");
+                    var category = FindField<ComboBox>(dialog, "_categoryBox");
+                    category.SelectedIndex = 2;
+                    Check("category picker filters to delays without changing stored enum", dialog.StepType == MacroStepType.Delay && FindField<ComboBox>(dialog, "_typeBox").Items.Count == 2);
+                    category.SelectedIndex = 1;
+                    Check("returning to keyboard category retains chosen Alt", dialog.StepType == MacroStepType.KeyPress && dialog.KeyCode == (int)Keys.Menu);
+                }
+                if (type is 5 or 6 or 7 or 13)
                 { using var bitmap = new Bitmap(dialog.Width, dialog.Height); dialog.DrawToBitmap(bitmap, new(Point.Empty, bitmap.Size)); bitmap.Save(Path.Combine(output, $"step-{type}.png")); }
             }
             File.WriteAllLines(Path.Combine(output, "results.txt"), results);
@@ -202,6 +258,30 @@ public sealed partial class MainForm
     internal void TogglePreviewTheme() => ToggleTheme();
     internal void VerifyPreviewInteractions(Action<string, bool> check)
     {
+        PreviewRunning();
+        var runningName = _activityTitle.Text;
+        _profileList.SelectedIndex = 2;
+        SetStatus("已自动保存"); RefreshActivityDisplay();
+        check("running identity survives selection and routine status messages", _activityTitle.Text == runningName && _activityBadge.Text == "运行中" && _cancelButton.Enabled && !_runButton.Enabled);
+        CancelExecution();
+        check("stop requested is visible until execution actually ends", _activityBadge.Text == "停止中");
+        PreviewFinished();
+        check("finished task remains visible with disabled stop", _activityTitle.Text.Contains("已完成") && !_cancelButton.Enabled && _runButton.Enabled);
+        _globalPaused = true; RefreshActivityDisplay();
+        check("paused automation is visibly distinct from idle", _activityBadge.Text == "已暂停" && !_runButton.Enabled);
+        _globalPaused = false;
+        PreviewRecording();
+        check("recording is visible and identifies the destination scheme", _activityBadge.Text == "录制中" && _activityDetail.Text.Contains("鼠标、键盘") && _recordButton.Text.Contains("停止录制"));
+        PreviewFinished();
+        BeginActivity(ActivityMode.Running, _profiles[1]);
+        check("next queued or chained scheme replaces running identity", _activityTitle.Text == _profiles[1].Name && _profileList.ActiveProfileId == _profiles[1].Id);
+        FinishActivity("未完成 · " + _profiles[1].Name, "目标窗口未能切换", true);
+        SetStatus("就绪");
+        check("failure remains visible after routine status updates", _activityBadge.Text == "未完成" && _activityDetail.Text == "目标窗口未能切换");
+        BeginActivity(ActivityMode.Countdown, _profiles[0], "3 秒后开始录制");
+        check("recording countdown offers stop before recording starts", _cancelButton.Enabled && _recordButton.Enabled && !_runButton.Enabled && _activityBadge.Text == "准备录制");
+        PreviewFinished();
+        check("recording defaults include keyboard", (bool)typeof(RecorderService).GetMethod("Start")!.GetParameters()[0].DefaultValue!);
         _profileList.SelectedIndex = 1;
         check("selecting scheme binds identity and steps", _nameBox.Text == "右 · UU 远程" && CurrentStep?.X == 4778);
         var first = _profiles[0];
@@ -264,6 +344,38 @@ public sealed partial class MainForm
         File.WriteAllLines(path + ".layout.txt", Enumerate(this).Select(c => $"{c.GetType().Name} {c.Text} bounds={c.Bounds} font={c.Font.Size} dpi={c.DeviceDpi} preferred={c.PreferredSize} visible={c.Visible}"));
         static IEnumerable<Control> Enumerate(Control root) { yield return root; foreach(Control c in root.Controls) foreach(var item in Enumerate(c)) yield return item; }
     }
+    internal void PreviewRunning() => BeginActivity(ActivityMode.Running, _profiles[0]);
+    internal void PreviewRecording() => BeginActivity(ActivityMode.Recording, _profiles[3]);
+    internal void PreviewFinished() => FinishActivity($"已完成 · {_profiles[0].Name}", "本次运行已结束，等待下一次触发。");
+    internal void VerifyExecutionLifecycle(Action<string, bool> check)
+    {
+        // Only delays and a link to another private delay fixture: no desktop input.
+        var follow = new MacroProfile { Name = "后续等待", Steps = [new() { Type = MacroStepType.Delay, DelayMs = 80 }] };
+        var first = new MacroProfile { Name = "前置等待", Steps = [new() { Type = MacroStepType.Delay, DelayMs = 80 }, new() { Type = MacroStepType.ChainMacro, ChainMacroId = follow.Id }] };
+        _profiles.Add(follow);
+        var run = RunAndDrainAsync(first);
+        check("real execution shows running state before completion", _activityMode == ActivityMode.Running && _activityName == first.Name && _cancelButton.Enabled);
+        PumpUntil(() => run.IsCompleted);
+        run.GetAwaiter().GetResult();
+        check("real chain finishes with final scheme identity", _activityMode == ActivityMode.Idle && _activityTitle.Text.Contains(follow.Name) && !_cancelButton.Enabled && _runningProfileId is null);
+        var longDelay = new MacroProfile { Name = "可停止等待", Steps = [new() { Type = MacroStepType.Delay, DelayMs = 10000 }] };
+        run = RunAndDrainAsync(longDelay); CancelExecution();
+        check("real cancellation first displays stopping", _activityMode == ActivityMode.Stopping);
+        PumpUntil(() => run.IsCompleted); run.GetAwaiter().GetResult();
+        check("real cancellation finishes without retaining a running badge", _activityMode == ActivityMode.Idle && _activityTitle.Text == "已停止 · 可停止等待" && !_cancelButton.Enabled);
+        run = RunAndDrainAsync(follow); PumpUntil(() => run.IsCompleted); run.GetAwaiter().GetResult();
+        check("new execution after stop clears cancellation state", !_stopRequested && _activityTitle.Text.Contains("已完成"));
+        _profiles.Remove(follow); PreviewFinished();
+        static void PumpUntil(Func<bool> condition)
+        {
+            var deadline = Environment.TickCount64 + 5000;
+            while (!condition())
+            {
+                if (Environment.TickCount64 >= deadline) throw new TimeoutException("offline execution lifecycle");
+                Application.DoEvents(); Thread.Sleep(1);
+            }
+        }
+    }
     private void SelectPreviewPanel(int page)
     {
         if (page != 2) _diagnosticCheck.Checked = false;
@@ -274,7 +386,7 @@ public sealed partial class MainForm
     }
     internal bool ValidatePreviewLayout(out string error)
     {
-        foreach (var c in new Control[] { _cancelButton, _profileList, _stepList, _recordButton, _screenMap, _hotkeyBox, _logList })
+        foreach (var c in new Control[] { _cancelButton, _runButton, _activityTitle, _activityBadge, _themeButton, _profileList, _stepList, _recordButton, _screenMap, _hotkeyBox, _logList })
         {
             if (c.Width < 20 || c.Height < 20) { error = $"{c.Name}/{c.AccessibleName} too small {c.Bounds}"; return false; }
             if (c.Parent is FlowLayoutPanel flow && c.Right > flow.ClientSize.Width) { error = "Clipped action " + c.Text; return false; }

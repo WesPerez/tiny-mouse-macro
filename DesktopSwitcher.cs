@@ -5,6 +5,9 @@ namespace TinyMouseMacro;
 
 internal static class DesktopSwitcher
 {
+    internal static bool IsRemoteProcess(string name) => IsVmwareProcess(name) ||
+        name.Equals("GameViewer", StringComparison.OrdinalIgnoreCase);
+
     internal static bool IsVmwareProcess(string name) => name.Equals("vmware", StringComparison.OrdinalIgnoreCase) ||
         name.Equals("vmware-vmx", StringComparison.OrdinalIgnoreCase) || name.Equals("mksSandbox", StringComparison.OrdinalIgnoreCase);
 }
