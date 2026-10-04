@@ -5,14 +5,15 @@
 
 ## 固定安装位置
 
-- 发布必须覆盖原安装位置，保持开机自启路径稳定。当前已核实的位置为 `C:\Users\Wes\Desktop\TinyMouseMacro.exe`，与 HKCU Run 的 `TinyMouseMacro` 项一致。
-- 统一运行 `./build-release.ps1`。脚本从当前用户的开机自启项读取目标；没有该项时检查桌面已有程序。无法确定时应明确确认路径，不猜测、不创建另一套正式发布目录。
-- 不再使用 `publish_redesign`、`publish_new` 等目录交付。临时编译、自测与发布暂存可以使用本次专属临时目录，结束时清理；最终只有原安装目录保留发行文件。
-- 发布 `TinyMouseMacro.exe`、配套 `TinyMouseMacro.Switch.exe` 和 `TinyMouseMacro.README.md`。不改自启注册表，不覆盖桌面的通用 README 或其他应用文件。
+- 用户最新约束：安装固定为项目内 `publish\`，本机为 `E:\Project\Common\tiny-mouse-macro\publish\TinyMouseMacro.exe`；桌面只保留 `TinyMouseMacro.lnk`。此规则取代之前把 exe 放桌面的约定。
+- 统一运行 `./build-release.ps1`。主程序、配套 `TinyMouseMacro.Switch.exe` 和 `TinyMouseMacro.README.md` 都放进项目 `publish\`；快捷方式目标、工作目录及图标指向这里。不得从自启项反推新的发布位置。
+- 开机自启保留用户的开关状态：已启用时更新 HKCU Run 的 `TinyMouseMacro` 为项目 publish 路径，未启用时不自动开启。更新前核实自启项属于本项目旧桌面路径或当前 publish 路径。
+- 首次迁移在发布及启动入口校验成功后，将桌面上确属本项目的旧 `TinyMouseMacro.exe`、`TinyMouseMacro.Switch.exe` 和 `TinyMouseMacro.README.md` 移入回收站；不清理其他应用、通用 README 或用户生成的方案启动器。
+- 不用 `publish_new` 等平行目录交付。临时编译和自测使用本次专属临时目录，结束时回收；`publish/` 已被 Git 忽略。
 
 ## 运行中替换与权限
 
-- 用户已授权每次打包时中断运行中的本项目程序，无需再次询问。先完成编译和离线检查，再停止**完整可执行路径与目标一致**的 TinyMouseMacro 实例，等待退出后原位替换。
+- 用户已授权每次打包时中断运行中的本项目程序，无需再次询问。先完成编译和离线检查，再停止**完整可执行路径等于 publish 目标或迁移用旧桌面 exe**的 TinyMouseMacro 实例，等待退出后替换。
 - 不停止 VMware、GameViewer、iCUE 或其他程序；不按宽泛名字批量杀进程。
 - 旧版以管理员权限运行时，发布终端通常也需要管理员权限。停止失败必须中止部署并准确报告，不声称部署成功，不通过新目录回避文件占用，也不自动弹 UAC 打断前台。
 - 默认不自动重新启动程序，避免抢占前台或立即恢复定时宏；用户要求启动时再执行。
@@ -23,6 +24,7 @@
 - 清理本任务生成的离屏预览、自测 JSON、重复发行包及编译中间文件。递归删除前校验绝对路径和归属，使用 PowerShell `-LiteralPath`；不要混用 cmd 删除。
 - 本会话残留及构建专属临时目录统一移入回收站，保留恢复能力；不得用直接删除绕过回收站要求。构建脚本正常结束时自动回收已核验归属的暂存目录。
 - 保留 `%APPDATA%\TinyMouseMacro\` 下的方案、偏好和恢复备份，保留用户 IDE 文件、用户生成的方案启动器及其他项目文件。不要把测试配置写入真实配置。
+- 运行时配置与内部日志必须位于用户 AppData：现有方案、偏好、活动日志在 `%APPDATA%\TinyMouseMacro\`；启动器错误及默认离线检查输出在 `%LOCALAPPDATA%\TinyMouseMacro\`。不得写入 publish 或桌面。用户主动导出的文件由其选择位置；截图动作产物保留在用户 Pictures\TinyMouseMacro，属于输出而非内部配置。
 - 仅提交源码、文档和构建脚本；不提交可执行文件、`bin`、`obj`、自测产物或用户配置。
 - 离线检查通过不代表 VMware／UU 抓取输入时已实测成功。报告中必须区分收到快捷键、成功切回及尚未实测的场景。
 

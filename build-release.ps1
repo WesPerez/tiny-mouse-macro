@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([string]$TargetExe)
+param()
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -12,27 +12,43 @@ function Send-FileToRecycleBin([string]$Path) {
         [Microsoft.VisualBasic.FileIO.UICancelOption]::ThrowException)
 }
 
-# Preserve the installed path used by startup. Never execute a registry command line.
-if (-not $TargetExe) {
-    $runKey = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -ErrorAction SilentlyContinue
-    $entry = if ($runKey) { $runKey.PSObject.Properties['TinyMouseMacro'] } else { $null }
-    if ($entry -and $entry.Value) {
-        $command = [Environment]::ExpandEnvironmentVariables([string]$entry.Value).Trim()
-        if ($command -match '^"([^"]+\\TinyMouseMacro\.exe)"(?:\s+.*)?$') { $TargetExe = $Matches[1] }
-        elseif ($command -match '^([^"\r\n]+\\TinyMouseMacro\.exe)$') { $TargetExe = $Matches[1] }
-        else { throw 'Cannot parse TinyMouseMacro startup path. Specify -TargetExe with the existing executable path.' }
+# The project owns the installation; the desktop contains only a shortcut.
+$targetDirectory = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'publish'))
+$TargetExe = Join-Path $targetDirectory 'TinyMouseMacro.exe'
+$desktopDirectory = [Environment]::GetFolderPath('Desktop')
+$legacyExe = Join-Path $desktopDirectory 'TinyMouseMacro.exe'
+$shortcutPath = Join-Path $desktopDirectory 'TinyMouseMacro.lnk'
+$runKeyPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+$runKey = Get-ItemProperty -LiteralPath $runKeyPath -ErrorAction SilentlyContinue
+$entry = if ($runKey) { $runKey.PSObject.Properties['TinyMouseMacro'] } else { $null }
+$previousStartup = if ($entry) { [string]$entry.Value } else { $null }
+if ([string]::IsNullOrWhiteSpace($previousStartup)) { $previousStartup = $null }
+$startupArguments = ''
+if ($null -ne $previousStartup) {
+    $command = [Environment]::ExpandEnvironmentVariables($previousStartup).Trim()
+    if ($command -match '^"([^"]+\\TinyMouseMacro\.exe)"(\s+.*)?$') {
+        $startupExe = $Matches[1]
+        if ($Matches.ContainsKey(2)) { $startupArguments = $Matches[2] }
     }
-    else {
-        $desktopExe = Join-Path ([Environment]::GetFolderPath('Desktop')) 'TinyMouseMacro.exe'
-        if (Test-Path -LiteralPath $desktopExe -PathType Leaf) { $TargetExe = $desktopExe }
-        else { throw 'No installed path found. Specify -TargetExe; do not create an alternate release directory.' }
+    elseif ($command -match '^([^"\r\n]+\\TinyMouseMacro\.exe)$') { $startupExe = $Matches[1] }
+    else { throw 'Unrecognized startup entry; no files or settings were changed.' }
+    if ($startupExe -ine $legacyExe -and $startupExe -ine $TargetExe) {
+        throw "Startup references another installation: $startupExe. Refusing to overwrite it."
     }
 }
-if (-not [IO.Path]::IsPathRooted($TargetExe)) { throw 'TargetExe must be an absolute path.' }
-$TargetExe = [IO.Path]::GetFullPath($TargetExe)
-if ([IO.Path]::GetFileName($TargetExe) -ine 'TinyMouseMacro.exe') { throw 'TargetExe must name TinyMouseMacro.exe.' }
-$targetDirectory = Split-Path -Parent $TargetExe
-if (-not (Test-Path -LiteralPath $targetDirectory -PathType Container)) { throw 'The installed directory must already exist.' }
+$shell = New-Object -ComObject WScript.Shell
+if (Test-Path -LiteralPath $shortcutPath) {
+    $existingShortcut = $shell.CreateShortcut($shortcutPath)
+    if ($existingShortcut.TargetPath -ine $legacyExe -and $existingShortcut.TargetPath -ine $TargetExe) {
+        throw 'Desktop shortcut belongs to another target; no files or settings were changed.'
+    }
+}
+$legacyFiles = @(foreach ($name in @('TinyMouseMacro.exe', 'TinyMouseMacro.Switch.exe', 'TinyMouseMacro.README.md')) {
+    $legacyPath = Join-Path $desktopDirectory $name
+    if (Test-Path -LiteralPath $legacyPath -PathType Leaf) {
+        @{ Path = $legacyPath; Hash = (Get-FileHash -LiteralPath $legacyPath).Hash }
+    }
+})
 
 if (-not ('TinyMouseMacro.DeploymentProcess' -as [type])) {
     Add-Type -TypeDefinition @'
@@ -100,7 +116,7 @@ try {
     foreach ($process in @(Get-Process -Name TinyMouseMacro -ErrorAction SilentlyContinue)) {
         try { $processPath = [TinyMouseMacro.DeploymentProcess]::PathOf($process.Id) }
         catch { if (-not (Get-Process -Id $process.Id -ErrorAction SilentlyContinue)) { continue }; throw }
-        if ($processPath -ine $TargetExe) { continue }
+        if ($processPath -ine $TargetExe -and $processPath -ine $legacyExe) { continue }
         Write-Output "Stopping TinyMouseMacro PID $($process.Id) at $processPath"
         try {
             Stop-Process -Id $process.Id -Force -ErrorAction Stop
@@ -109,13 +125,23 @@ try {
         catch { throw "Cannot stop the installed instance. Run this script from an administrator PowerShell. No installed files were replaced. $($_.Exception.Message)" }
     }
 
+    New-Item -ItemType Directory -Path $targetDirectory -Force | Out-Null
+    $stagedShortcut = Join-Path $stage 'TinyMouseMacro.lnk'
+    $shortcut = $shell.CreateShortcut($stagedShortcut)
+    $shortcut.TargetPath = $TargetExe
+    $shortcut.WorkingDirectory = $targetDirectory
+    $shortcut.IconLocation = "$TargetExe,0"
+    $shortcut.Description = '多屏切换与键鼠录制'
+    $shortcut.Save()
     $files = @(
         @{ Source = (Join-Path $launcherPublish 'TinyMouseMacro.Switch.exe'); Target = (Join-Path $targetDirectory 'TinyMouseMacro.Switch.exe') },
         @{ Source = (Join-Path $PSScriptRoot 'README.md'); Target = (Join-Path $targetDirectory 'TinyMouseMacro.README.md') },
-        @{ Source = (Join-Path $appPublish 'TinyMouseMacro.exe'); Target = $TargetExe }
+        @{ Source = (Join-Path $appPublish 'TinyMouseMacro.exe'); Target = $TargetExe },
+        @{ Source = $stagedShortcut; Target = $shortcutPath }
     )
     # Keep recovery data if execution is interrupted during replacement.
     $keepRecovery = $true
+    $startupUpdated = $false
     try {
         foreach ($file in $files) {
             $backup = $null
@@ -127,22 +153,52 @@ try {
             Install-FileAtomically $file.Source $file.Target
             if ((Get-FileHash -LiteralPath $file.Source).Hash -ne (Get-FileHash -LiteralPath $file.Target).Hash) { throw "Deployed file verification failed: $($file.Target)" }
         }
+        $installedShortcut = $shell.CreateShortcut($shortcutPath)
+        if ($installedShortcut.TargetPath -ine $TargetExe -or $installedShortcut.WorkingDirectory -ine $targetDirectory) {
+            throw 'Desktop shortcut verification failed.'
+        }
+        # Preserve whether the user enabled startup. Never enable it merely by building.
+        if ($null -ne $previousStartup) {
+            $startupValue = '"' + $TargetExe + '"' + $startupArguments
+            $startupUpdated = $true
+            Set-ItemProperty -LiteralPath $runKeyPath -Name TinyMouseMacro -Value $startupValue
+            if ((Get-ItemPropertyValue -LiteralPath $runKeyPath -Name TinyMouseMacro) -cne $startupValue) {
+                throw 'Startup path verification failed.'
+            }
+        }
     }
     catch {
         $deploymentError = $_
+        $rollbackFailed = $false
+        if ($startupUpdated) {
+            try { Set-ItemProperty -LiteralPath $runKeyPath -Name TinyMouseMacro -Value $previousStartup }
+            catch { $rollbackFailed = $true; Write-Warning 'Startup rollback failed; recovery files retained.' }
+        }
         for ($index = $replaced.Count - 1; $index -ge 0; $index--) {
             $file = $replaced[$index]
             try {
                 if ($file.Backup) { Install-FileAtomically $file.Backup $file.Target }
                 elseif (Test-Path -LiteralPath $file.Target) { Send-FileToRecycleBin $file.Target }
             }
-            catch { $keepRecovery = $true; Write-Warning "Restore failed for $($file.Target). Recovery files retained at $stage" }
+            catch { $rollbackFailed = $true; Write-Warning "Restore failed for $($file.Target). Recovery files retained at $stage" }
         }
+        $keepRecovery = $rollbackFailed
         throw $deploymentError
     }
     $keepRecovery = $false
     Write-Output "Deployed and verified: $TargetExe"
-    Write-Output 'Startup entry and user data preserved. The application was not restarted.'
+    Write-Output "Desktop shortcut verified: $shortcutPath"
+    Write-Output 'Startup enabled/disabled state preserved; enabled startup points to publish. User data preserved. Application not restarted.'
+    # Only these three legacy delivery files are owned by this migration. Leave GUID
+    # launchers, user exports and all other desktop files alone; retain recoverability.
+    foreach ($legacy in $legacyFiles) {
+        if ((Split-Path -Parent $legacy.Path) -ine $desktopDirectory -or $legacy.Path -in $files.Target) { throw 'Invalid legacy cleanup scope.' }
+        if (-not (Test-Path -LiteralPath $legacy.Path)) { continue }
+        if ((Get-FileHash -LiteralPath $legacy.Path).Hash -ne $legacy.Hash) { throw "Deployment succeeded, but desktop cleanup is incomplete: changed file retained at $($legacy.Path)" }
+        try { Send-FileToRecycleBin $legacy.Path }
+        catch { throw "Deployment succeeded, but desktop cleanup is incomplete: $($legacy.Path). $($_.Exception.Message)" }
+        Write-Output "Recycled legacy file: $($legacy.Path)"
+    }
 }
 finally {
     Pop-Location

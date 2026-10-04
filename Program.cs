@@ -15,7 +15,8 @@ static class Program
         if (args.Length > 0 && args[0] == "--self-test")
         {
             ApplicationConfiguration.Initialize();
-            return SelfTest.Run(args.Length > 1 ? args[1] : Path.Combine(AppContext.BaseDirectory, "verification"));
+            return SelfTest.Run(args.Length > 1 ? args[1] : Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TinyMouseMacro", "verification"));
         }
 
         using var mutex = new Mutex(true, MutexName, out var createdNew);

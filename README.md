@@ -33,14 +33,20 @@
 - 方案：`%APPDATA%\TinyMouseMacro\macros.json`。旧版方案和坐标兼容。
 - 偏好：同目录的 `preferences.json`。
 - 详细日志：同目录的 `activity.log`，约 128 KB 后轮转，最多保留两份。不记录普通打字内容。
+- 启动器错误：`%LOCALAPPDATA%\TinyMouseMacro\launcher-last-error.txt`。配置和内部日志不会放在桌面或程序目录。
+- 截图动作的输出：用户“图片”目录下的 `TinyMouseMacro`；手动导出方案的位置由你选择。
 - 保存使用原子替换，首次改写前保留 `macros.json.backup`。
 - 发布命令：`./build-release.ps1`。
 
-脚本先编译和离线检查，再停止原安装路径下的运行实例，覆盖主程序、配套启动器和 `TinyMouseMacro.README.md`。本机原安装位置为 `C:\Users\Wes\Desktop\TinyMouseMacro.exe`，与开机启动一致。发布后核对哈希，临时文件移入回收站，保留方案和自启项。不自动重启或弹 UAC；若当前实例以管理员权限运行，发布也需同等权限。协作约束见 [AGENTS.md](AGENTS.md)。
+程序安装在项目的 `publish\` 目录，本机为 `E:\Project\Common\tiny-mouse-macro\publish\TinyMouseMacro.exe`。桌面只保留 `TinyMouseMacro` 快捷方式，配套启动器和说明文件都在 publish 内。
+
+发布脚本先编译和离线检查，停止该安装路径或旧桌面路径下的本项目实例，再更新程序和桌面快捷方式。已启用的开机自启同步指向新位置；未启用的保持关闭。首次迁移把桌面旧程序及两个配套文件移入回收站。每次发布核对文件哈希并回收临时文件，保留 AppData 中的方案和偏好。不自动重启或弹 UAC；若当前实例以管理员权限运行，停止它需要相应权限。协作约束见 [AGENTS.md](AGENTS.md)。
 
 ## 开发与验证
 
 `--self-test` 使用模拟输入环境，不显示窗口、不注册全局热键、不安装监听、不向桌面注入键鼠。包含格式兼容、时间间隔、焦点失败、落点回弹、取消释放、连续切屏和离屏界面检查，不能替代实际 VMware / UU 测试。
+
+发布时自测输出写入构建专属临时目录并在结束后回收；手动运行 `--self-test` 未指定输出路径时写入 `%LOCALAPPDATA%\TinyMouseMacro\verification`。
 
 回放使用带标记的 `SendInput`，鼠标移动采用虚拟桌面绝对坐标；按下鼠标按钮的同一个输入包包含位置，避免移动与点击使用两套坐标状态。键盘采用扫描码，文本采用 Unicode。远端是否接受输入仍取决于对应应用。
 
