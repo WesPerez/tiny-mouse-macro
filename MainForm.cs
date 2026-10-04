@@ -1,6 +1,6 @@
 namespace TinyMouseMacro;
 
-public sealed class MainForm : Form
+public sealed partial class MainForm : Form
 {
     private const int MaxChainDepth = 32;
     private const string ThemeRoleAccentButton = "AccentButton";
@@ -24,7 +24,6 @@ public sealed class MainForm : Form
     private bool _isBinding;
     private bool _dirty;
     private bool _globalPaused;
-    private const int PauseHotkeyId = 999;
     private int _dragStepIndex = -1;
     private MacroProfile? _recordingProfile;
 
@@ -43,20 +42,22 @@ public sealed class MainForm : Form
     private readonly ListBox _stepList = new();
     private readonly Label _livePositionLabel = new();
     private readonly Label _statusLabel = new();
-    private readonly TextBox _screenInfoBox = new();
     private readonly ListBox _logList = new();
     private readonly TextBox _searchBox = new();
     private readonly Button _cancelButton;
     private readonly NotifyIcon _trayIcon;
     private bool _reallyClosing;
 
-    public MainForm()
+    public MainForm(bool preview = false)
     {
+        _preview = preview;
+        AutoScaleDimensions = new SizeF(96, 96);
+        AutoScaleMode = AutoScaleMode.Dpi;
         Text = UiText.AppTitle;
         StartPosition = FormStartPosition.CenterScreen;
-        MinimumSize = new Size(980, 758);
-        Size = new Size(1100, 818);
-        Font = new Font(Theme.UiFont, 9F);
+        MinimumSize = new Size(1080, 700);
+        Size = new Size(1200, 860);
+        Font = Theme.BodyFont;
         KeyPreview = true;
         Theme.ApplyToForm(this);
 
@@ -87,7 +88,7 @@ public sealed class MainForm : Form
         {
             Icon = TryLoadIcon(),
             Text = UiText.AppTitle,
-            Visible = true,
+            Visible = !preview,
             ContextMenuStrip = new ContextMenuStrip()
         };
         _trayIcon.ContextMenuStrip.Items.Add(showItem);
@@ -106,23 +107,26 @@ public sealed class MainForm : Form
             Margin = new Padding(4)
         };
         Theme.StyleDangerButton(_cancelButton);
-        _cancelButton.Click += (_, _) => CancelExecution();
 
         BuildUi();
         Load += MainForm_Load;
         FormClosing += MainForm_FormClosing;
 
-        _hotkeys = new HotkeyService(Handle);
-        _hotkeys.HookTriggered += profile =>
+        if (!preview)
         {
-            PostToUi(() =>
+            _externalTrigger = new ExternalTrigger(Handle);
+            _hotkeys = new HotkeyService();
+            _hotkeys.Triggered += signal => PostToUi(() =>
             {
-                if (!_globalPaused)
-                {
-                    RunMacro(profile);
-                }
+                _lastSignal.Text = $"{DateTime.Now:HH:mm:ss}  {signal.Shortcut} · {signal.Source}";
+                Log(_lastSignal.Text + (signal.Diagnostic ? " · 仅检测" : ""));
+                if (signal.Diagnostic || _diagnosticCheck.Checked || _globalPaused || IsCapturing) return;
+                var profile = _profiles.FirstOrDefault(p => p.Id == signal.ProfileId && p.Enabled);
+                if (profile is not null) RunMacro(profile);
             });
-        };
+            _hotkeys.EmergencyStop += () => { _executor.Cancel(); PostToUi(StopAll); };
+            _hotkeys.PauseRequested += () => PostToUi(ToggleGlobalPause);
+        }
 
         _executor.ChainMacroRequested += chainId =>
         {
@@ -136,34 +140,27 @@ public sealed class MainForm : Form
             });
         };
 
-        _recorder = new RecorderService();
-        _recorder.StepRecorded += step =>
+        if (!preview)
         {
-            PostToUi(() =>
-            {
-                var profile = _recordingProfile ?? CurrentProfile;
-                if (profile is null) return;
-
-                profile.Steps.Add(step);
-                if (ReferenceEquals(profile, CurrentProfile))
-                {
-                    RefreshSteps();
-                    _stepList.SelectedItem = step;
-                }
-                MarkDirty();
-            });
-        };
-
+            _recorder = new RecorderService();
+            _recorder.StepRecorded += step => _recordQueue.Enqueue(step);
+        }
+        _cancelButton.Click += (_, _) => StopAll();
         KeyDown += MainForm_KeyDown;
-
-        NativeMethods.RegisterHotKey(Handle, PauseHotkeyId, NativeMethods.ModControl | NativeMethods.ModAlt | NativeMethods.ModNoRepeat, (uint)Keys.P);
+        if (!preview) LoadPreferences();
+        // All layout dimensions above are 96-DPI units. Scale after controls exist,
+        // rather than scaling an empty form before building the control tree.
+        AutoScaleDimensions = new SizeF(96, 96);
+        PerformAutoScale();
     }
 
     private void MainForm_KeyDown(object? sender, KeyEventArgs e)
     {
+        if (_hotkeyBox.Focused || _hookKeyBox.Focused) return;
+        if (e.KeyCode == Keys.Escape) { e.SuppressKeyPress = true; StopAll(); return; }
         if (e.Control && e.KeyCode == Keys.S)
         {
-            e.Handled = true;
+            e.Handled = e.SuppressKeyPress = true;
             SaveAndReload();
         }
         else if (e.KeyCode == Keys.Delete && _stepList.Focused)
@@ -183,16 +180,19 @@ public sealed class MainForm : Form
             return;
         }
 
-        if (m.Msg == NativeMethods.WmHotkey && m.WParam.ToInt32() == PauseHotkeyId)
+        if (_externalTrigger?.TryGetProfile(unchecked((uint)m.Msg), out var profileId) == true)
         {
-            ToggleGlobalPause();
-            return;
-        }
-
-        if (m.Msg == NativeMethods.WmHotkey && _hotkeys?.TryGetProfile(m.WParam.ToInt32(), out var profile) == true && profile is not null)
-        {
-            if (_globalPaused) return;
-            RunMacro(profile);
+            if (!_externalTriggerCheck.Checked || !_profiles.Any(p => p.Id == profileId && p.Enabled && ExternalTrigger.IsEligible(p)))
+            { m.Result = 0; return; }
+            PostToUi(() =>
+            {
+                var profile = _profiles.FirstOrDefault(p => p.Id == profileId && p.Enabled);
+                if (!_externalTriggerCheck.Checked || profile is null || !ExternalTrigger.IsEligible(profile)) return;
+                _lastSignal.Text = $"{DateTime.Now:HH:mm:ss}  {profile.Name} · iCUE / 本地启动器";
+                Log(_lastSignal.Text);
+                if (!_diagnosticCheck.Checked) RunMacro(profile);
+            });
+            m.Result = 1; // Acknowledge receipt, not completion of the screen switch.
             return;
         }
 
@@ -207,27 +207,31 @@ public sealed class MainForm : Form
         _profileList.DisplayMember = nameof(MacroProfile.DisplayText);
         _profileList.SelectedIndex = _profiles.Count > 0 ? 0 : -1;
 
-        RefreshScreenInfo();
         BindSelectedProfile();
         RebuildHotkeys();
-        _positionTimer.Start();
-        _scheduleTimer.Start();
+        if (!_preview) { _positionTimer.Start(); _scheduleTimer.Start(); }
+        _saveState.Text = "更改自动保存";
     }
 
     private void MainForm_FormClosing(object? sender, FormClosingEventArgs e)
     {
-        if (!_reallyClosing)
+        if (!_reallyClosing && e.CloseReason == CloseReason.UserClosing && !_preview)
         {
             e.Cancel = true;
+            StopAll();
+            if (!SaveAll(force: true)) return;
+            _positionTimer.Stop();
             Hide();
             return;
         }
 
-        CancelExecution();
-        SaveAll();
+        StopAll();
+        if (!SaveAll(force: true)) { e.Cancel = true; _reallyClosing = false; return; }
+        _saveTimer.Dispose();
+        _recordUiTimer.Dispose();
         _scheduleTimer.Dispose();
         _positionTimer.Dispose();
-        NativeMethods.UnregisterHotKey(Handle, PauseHotkeyId);
+
         _hotkeys?.Dispose();
         _recorder?.Dispose();
         _trayIcon.Dispose();
@@ -236,9 +240,11 @@ public sealed class MainForm : Form
     private void ToggleGlobalPause()
     {
         _globalPaused = !_globalPaused;
+        if (_hotkeys is not null) _hotkeys.Paused = _globalPaused;
+        _pauseButton.Text = _globalPaused ? "恢复全部快捷键" : "暂停全部快捷键";
         if (_globalPaused)
         {
-            CancelExecution();
+            StopAll();
             SetStatus(UiText.GlobalPaused);
             _trayIcon.Text = UiText.AppTitle + UiText.PausedSuffix;
         }
@@ -252,438 +258,34 @@ public sealed class MainForm : Form
     private void ShowFromTray()
     {
         Show();
+        if (!_preview) _positionTimer.Start();
         WindowState = FormWindowState.Normal;
         BringToFront();
         Activate();
     }
 
-    private void BuildUi()
-    {
-        var root = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 2,
-            RowCount = 2,
-            Padding = new Padding(12)
-        };
-        root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 270));
-        root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
-        Theme.StylePanel(root);
-        Controls.Add(root);
-
-        root.Controls.Add(BuildProfilePanel(), 0, 0);
-
-        var right = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 1,
-            RowCount = 5,
-            Padding = new Padding(12, 0, 0, 0)
-        };
-        right.RowStyles.Add(new RowStyle(SizeType.Absolute, 78));
-        right.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        right.RowStyles.Add(new RowStyle(SizeType.Absolute, 86));
-        right.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
-        right.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        Theme.StylePanel(right);
-        root.Controls.Add(right, 1, 0);
-
-        right.Controls.Add(BuildProfileEditor(), 0, 0);
-        right.Controls.Add(BuildStepList(), 0, 1);
-        right.Controls.Add(BuildCaptureButtons(), 0, 2);
-        right.Controls.Add(BuildLivePositionPanel(), 0, 3);
-        right.Controls.Add(BuildBottomPanel(), 0, 4);
-
-        var statusPanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2 };
-        statusPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        statusPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 118));
-        Theme.StylePanel(statusPanel);
-        _statusLabel.Dock = DockStyle.Fill;
-        _statusLabel.TextAlign = ContentAlignment.MiddleLeft;
-        _statusLabel.AutoEllipsis = true;
-        _statusLabel.Tag = ThemeRoleStatus;
-        Theme.StyleStatusBar(_statusLabel);
-        statusPanel.Controls.Add(_statusLabel, 0, 0);
-        statusPanel.Controls.Add(_cancelButton, 1, 0);
-        root.SetColumnSpan(statusPanel, 2);
-        root.Controls.Add(statusPanel, 0, 1);
-    }
-
-    private Control BuildProfilePanel()
-    {
-        var panel = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 4, ColumnCount = 1 };
-        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
-        panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 110));
-        Theme.StylePanel(panel);
-
-        var header = new Label { Text = UiText.Profiles, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
-        header.Tag = ThemeRoleSectionHeader;
-        Theme.StyleSectionHeader(header);
-        panel.Controls.Add(header, 0, 0);
-
-        _searchBox.Dock = DockStyle.Fill;
-        _searchBox.PlaceholderText = UiText.SearchHint;
-        _searchBox.TextChanged += (_, _) => FilterProfiles();
-        Theme.StyleTextBox(_searchBox);
-        panel.Controls.Add(_searchBox, 0, 1);
-
-        _profileList.Dock = DockStyle.Fill;
-        _profileList.IntegralHeight = false;
-        _profileList.SelectedIndexChanged += (_, _) => BindSelectedProfile();
-        Theme.StyleListBox(_profileList);
-        panel.Controls.Add(_profileList, 0, 2);
-
-        var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = true };
-        Theme.StylePanel(buttons);
-        buttons.Controls.Add(CreateButton(UiText.AddProfile, AddProfile, 118));
-        buttons.Controls.Add(CreateButton(UiText.DuplicateProfile, DuplicateProfile, 118));
-        buttons.Controls.Add(CreateButton(UiText.DeleteProfile, DeleteProfile, 118));
-        buttons.Controls.Add(CreateButton(UiText.ImportProfile, ImportProfile, 118));
-        buttons.Controls.Add(CreateButton(UiText.ExportProfile, ExportProfile, 118));
-        buttons.Controls.Add(CreateButton(UiText.ToggleTheme, ToggleTheme, 118));
-        buttons.Controls.Add(CreateButton(UiText.PickColor, PickPixelColor, 118));
-        buttons.Controls.Add(CreateAccentButton(UiText.SaveEnable, SaveAndReload, 118));
-        panel.Controls.Add(buttons, 0, 3);
-        return panel;
-    }
-
-    private Control BuildProfileEditor()
-    {
-        var panel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 8, RowCount = 5 };
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 70));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 30));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 70));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 20));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 70));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 20));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 70));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 30));
-        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
-        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
-        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
-        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
-        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
-        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
-        Theme.StylePanel(panel);
-
-        AddEditorLabel(panel, UiText.Name, 0, 0);
-        AddEditorLabel(panel, UiText.TriggerType, 2, 0);
-        AddEditorLabel(panel, UiText.Hotkey, 4, 0);
-        AddEditorLabel(panel, UiText.RepeatCount, 6, 0);
-
-        _nameBox.Dock = DockStyle.Fill;
-        _nameBox.TextChanged += (_, _) =>
-        {
-            if (_isBinding || CurrentProfile is null) return;
-            CurrentProfile.Name = string.IsNullOrWhiteSpace(_nameBox.Text) ? UiText.Untitled : _nameBox.Text.Trim();
-            _profilesSource.ResetBindings(false);
-            MarkDirty();
-        };
-        Theme.StyleTextBox(_nameBox);
-
-        _hotkeyBox.Dock = DockStyle.Fill;
-        _hotkeyBox.ReadOnly = true;
-        _hotkeyBox.PlaceholderText = UiText.HotkeyHint;
-        _hotkeyBox.KeyDown += HotkeyBox_KeyDown;
-        _hotkeyBox.PreviewKeyDown += (_, e) => e.IsInputKey = true;
-        Theme.StyleTextBox(_hotkeyBox);
-
-        _triggerTypeBox.DropDownStyle = ComboBoxStyle.DropDownList;
-        _triggerTypeBox.Items.AddRange([UiText.TriggerKeyboardHotkey, UiText.TriggerKeyboardHook, UiText.TriggerMouseButton]);
-        _triggerTypeBox.SelectedIndex = 0;
-        _triggerTypeBox.Dock = DockStyle.Fill;
-        _triggerTypeBox.SelectedIndexChanged += TriggerTypeBox_SelectedIndexChanged;
-        Theme.StyleComboBox(_triggerTypeBox);
-
-        _hookKeyBox.Dock = DockStyle.Fill;
-        _hookKeyBox.ReadOnly = true;
-        _hookKeyBox.PlaceholderText = UiText.HookKeyHint;
-        _hookKeyBox.KeyDown += HookKeyBox_KeyDown;
-        _hookKeyBox.PreviewKeyDown += (_, e) => e.IsInputKey = true;
-        _hookKeyBox.Visible = false;
-        Theme.StyleTextBox(_hookKeyBox);
-
-        _mouseButtonBox.DropDownStyle = ComboBoxStyle.DropDownList;
-        _mouseButtonBox.Items.AddRange([UiText.MouseX1, UiText.MouseX2, UiText.MouseMiddle]);
-        _mouseButtonBox.SelectedIndex = 0;
-        _mouseButtonBox.Dock = DockStyle.Fill;
-        _mouseButtonBox.Visible = false;
-        _mouseButtonBox.SelectedIndexChanged += (_, _) =>
-        {
-            if (_isBinding || CurrentProfile is null) return;
-            CurrentProfile.TriggerMouseButton = _mouseButtonBox.SelectedIndex switch
-            {
-                0 => 4,
-                1 => 5,
-                2 => 3,
-                _ => 0
-            };
-            MarkDirty();
-        };
-        Theme.StyleComboBox(_mouseButtonBox);
-
-        _repeatCountBox.Dock = DockStyle.Fill;
-        _repeatCountBox.ValueChanged += (_, _) =>
-        {
-            if (_isBinding || CurrentProfile is null) return;
-            CurrentProfile.RepeatCount = (int)_repeatCountBox.Value;
-            MarkDirty();
-        };
-        Theme.StyleNumericUpDown(_repeatCountBox);
-
-        _repeatIntervalBox.Dock = DockStyle.Fill;
-        _repeatIntervalBox.ValueChanged += (_, _) =>
-        {
-            if (_isBinding || CurrentProfile is null) return;
-            CurrentProfile.RepeatIntervalMs = (int)_repeatIntervalBox.Value;
-            MarkDirty();
-        };
-        Theme.StyleNumericUpDown(_repeatIntervalBox);
-
-        panel.Controls.Add(_nameBox, 1, 1);
-        panel.Controls.Add(_triggerTypeBox, 3, 1);
-        panel.Controls.Add(_hotkeyBox, 5, 1);
-        panel.Controls.Add(_repeatCountBox, 7, 1);
-
-        var repeatIntervalLabel = new Label { Text = UiText.RepeatInterval, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
-        Theme.StyleLabel(repeatIntervalLabel);
-        panel.Controls.Add(repeatIntervalLabel, 6, 2);
-        panel.Controls.Add(_repeatIntervalBox, 7, 2);
-
-        AddEditorLabel(panel, UiText.ScheduleInterval, 0, 3);
-        _scheduleIntervalBox.Dock = DockStyle.Fill;
-        _scheduleIntervalBox.ValueChanged += (_, _) =>
-        {
-            if (_isBinding || CurrentProfile is null) return;
-            CurrentProfile.ScheduleIntervalMinutes = (int)_scheduleIntervalBox.Value;
-            _profilesSource.ResetBindings(false);
-            MarkDirty();
-        };
-        Theme.StyleNumericUpDown(_scheduleIntervalBox);
-        panel.Controls.Add(_scheduleIntervalBox, 1, 3);
-
-        AddEditorLabel(panel, UiText.Enabled, 0, 4);
-        AddEditorLabel(panel, UiText.TargetWindow, 2, 4);
-        AddEditorLabel(panel, UiText.SpeedMultiplier, 6, 4);
-
-        _enabledCheckBox.Dock = DockStyle.Fill;
-        _enabledCheckBox.Checked = true;
-        _enabledCheckBox.CheckedChanged += (_, _) =>
-        {
-            if (_isBinding || CurrentProfile is null) return;
-            CurrentProfile.Enabled = _enabledCheckBox.Checked;
-            _profilesSource.ResetBindings(false);
-            MarkDirty();
-        };
-        panel.Controls.Add(_enabledCheckBox, 1, 4);
-
-        _targetWindowBox.Dock = DockStyle.Fill;
-        _targetWindowBox.PlaceholderText = UiText.TargetWindowHint;
-        _targetWindowBox.TextChanged += (_, _) =>
-        {
-            if (_isBinding || CurrentProfile is null) return;
-            CurrentProfile.TargetWindowTitle = _targetWindowBox.Text;
-            MarkDirty();
-        };
-        Theme.StyleTextBox(_targetWindowBox);
-        panel.SetColumnSpan(_targetWindowBox, 3);
-        panel.Controls.Add(_targetWindowBox, 3, 4);
-
-        _speedBox.Dock = DockStyle.Fill;
-        _speedBox.Value = 1.0m;
-        _speedBox.ValueChanged += (_, _) =>
-        {
-            if (_isBinding || CurrentProfile is null) return;
-            CurrentProfile.SpeedMultiplier = (double)_speedBox.Value;
-            MarkDirty();
-        };
-        Theme.StyleNumericUpDown(_speedBox);
-        panel.Controls.Add(_speedBox, 7, 4);
-
-        panel.Controls.Add(_hookKeyBox, 5, 1);
-        panel.Controls.Add(_mouseButtonBox, 5, 1);
-
-        return panel;
-    }
-
-    private static void AddEditorLabel(TableLayoutPanel panel, string text, int col, int row)
-    {
-        var label = new Label { Text = text, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
-        Theme.StyleLabel(label);
-        panel.Controls.Add(label, col, row);
-    }
-
-    private Control BuildStepList()
-    {
-        var panel = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 1 };
-        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-        panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        Theme.StylePanel(panel);
-
-        var header = new Label { Text = UiText.Steps, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
-        Theme.StyleSectionHeader(header);
-        panel.Controls.Add(header, 0, 0);
-
-        _stepList.Dock = DockStyle.Fill;
-        _stepList.IntegralHeight = false;
-        _stepList.DataSource = _stepsSource;
-        _stepList.MouseDoubleClick += StepList_MouseDoubleClick;
-        _stepList.MouseDown += StepList_MouseDown;
-        _stepList.MouseMove += StepList_MouseMove;
-        _stepList.DragOver += StepList_DragOver;
-        _stepList.DragDrop += StepList_DragDrop;
-        _stepList.AllowDrop = true;
-        Theme.StyleListBox(_stepList);
-        panel.Controls.Add(_stepList, 0, 1);
-        return panel;
-    }
-
-    private Control BuildCaptureButtons()
-    {
-        var panel = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = true };
-        Theme.StylePanel(panel);
-        panel.Controls.Add(CreateButton(UiText.CapturePointDelay, async () => await CapturePointAfterDelayAsync(false), 190));
-        panel.Controls.Add(CreateButton(UiText.RecordNextClick, async () => await CapturePointAfterDelayAsync(true), 190));
-        panel.Controls.Add(CreateButton(UiText.RecordRightClick, async () => await CapturePointAfterDelayAsync(false, MacroStepType.RightClick), 160));
-        panel.Controls.Add(CreateButton(UiText.RecordDoubleClick, async () => await CapturePointAfterDelayAsync(false, MacroStepType.DoubleClick), 160));
-        panel.Controls.Add(CreateButton(UiText.AddDelay, AddDelayStep, 140));
-        panel.Controls.Add(CreateButton(UiText.AddRelativeMove, AddRelativeMoveStep, 140));
-        panel.Controls.Add(CreateButton(UiText.AddKeyCombo, AddKeyComboStep, 140));
-        panel.Controls.Add(CreateButton(UiText.AddTypeText, AddTypeTextStep, 140));
-        panel.Controls.Add(CreateButton(UiText.AddWaitPixel, AddWaitPixelStep, 140));
-        panel.Controls.Add(CreateButton(UiText.AddFindPixel, AddFindPixelStep, 140));
-        panel.Controls.Add(CreateButton(UiText.AddScreenshot, AddScreenshotStep, 140));
-        panel.Controls.Add(CreateAccentButton(UiText.StartRecording, ToggleRecording, 120));
-        panel.Controls.Add(CreateButton(UiText.DuplicateStep, DuplicateStep, 120));
-        panel.Controls.Add(CreateButton(UiText.MoveUp, MoveStepUp, 104));
-        panel.Controls.Add(CreateButton(UiText.MoveDown, MoveStepDown, 104));
-        panel.Controls.Add(CreateButton(UiText.DeleteStep, DeleteStep, 104));
-        panel.Controls.Add(CreateAccentButton(UiText.TestRun, TestRun, 104));
-        return panel;
-    }
-
-    private Control BuildLivePositionPanel()
-    {
-        var panel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1 };
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 180));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        Theme.StylePanel(panel);
-
-        var label = new Label { Text = UiText.LivePosition, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
-        Theme.StyleLabel(label);
-        panel.Controls.Add(label, 0, 0);
-
-        _livePositionLabel.Dock = DockStyle.Fill;
-        _livePositionLabel.TextAlign = ContentAlignment.MiddleLeft;
-        _livePositionLabel.Tag = ThemeRoleMonoLabel;
-        Theme.StyleMonoLabel(_livePositionLabel);
-        panel.Controls.Add(_livePositionLabel, 1, 0);
-        return panel;
-    }
-
-    private Control BuildScreenInfo()
-    {
-        var panel = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 1 };
-        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-        panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        Theme.StylePanel(panel);
-
-        var header = new Label { Text = UiText.ScreenInfo, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
-        header.Tag = ThemeRoleSectionHeader;
-        Theme.StyleSectionHeader(header);
-        panel.Controls.Add(header, 0, 0);
-
-        _screenInfoBox.Dock = DockStyle.Fill;
-        _screenInfoBox.Multiline = true;
-        _screenInfoBox.ReadOnly = true;
-        _screenInfoBox.ScrollBars = ScrollBars.None;
-        _screenInfoBox.Tag = ThemeRoleMonoTextBox;
-        Theme.StyleTextBox(_screenInfoBox);
-        _screenInfoBox.Font = new Font(Theme.MonoFont, 8.5F);
-        panel.Controls.Add(_screenInfoBox, 0, 1);
-        return panel;
-    }
-
-    private Control BuildBottomPanel()
-    {
-        var split = new SplitContainer
-        {
-            Dock = DockStyle.Fill,
-            Orientation = Orientation.Horizontal,
-            SplitterDistance = 120,
-            Panel1MinSize = 60,
-            Panel2MinSize = 60
-        };
-        Theme.StylePanel(split.Panel1);
-        Theme.StylePanel(split.Panel2);
-        split.Panel1.Controls.Add(BuildScreenInfo());
-        split.Panel2.Controls.Add(BuildLogPanel());
-        return split;
-    }
-
-    private Control BuildLogPanel()
-    {
-        var panel = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 1 };
-        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
-        panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        Theme.StylePanel(panel);
-
-        var header = new Label { Text = UiText.ExecutionLog, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
-        header.Tag = ThemeRoleSectionHeader;
-        Theme.StyleSectionHeader(header);
-        panel.Controls.Add(header, 0, 0);
-
-        _logList.Dock = DockStyle.Fill;
-        _logList.IntegralHeight = false;
-        Theme.StyleListBox(_logList);
-        panel.Controls.Add(_logList, 0, 1);
-        return panel;
-    }
-
-    private Button CreateButton(string text, Action action, int width)
-    {
-        var button = new Button { Text = text, Width = width, Height = 32, Margin = new Padding(4) };
-        Theme.StyleButton(button);
-        button.Click += (_, _) => action();
-        return button;
-    }
-
-    private Button CreateAccentButton(string text, Action action, int width)
-    {
-        var button = new Button { Text = text, Width = width, Height = 32, Margin = new Padding(4), Tag = ThemeRoleAccentButton };
-        Theme.StyleAccentButton(button);
-        button.Click += (_, _) => action();
-        return button;
-    }
-
     private MacroProfile? CurrentProfile => _profileList.SelectedItem as MacroProfile;
     private MacroStep? CurrentStep => _stepList.SelectedItem as MacroStep;
 
-    private void HotkeyBox_KeyDown(object? sender, KeyEventArgs e)
+    private void HotkeyBox_KeyDown(object? sender, KeyEventArgs e) => CaptureShortcut(e, false);
+
+    private void CaptureShortcut(KeyEventArgs e, bool direct)
     {
-        e.Handled = true;
-        var hotkey = HotkeyParser.FromKeyEvent(e);
-        if (string.IsNullOrWhiteSpace(hotkey))
+        e.Handled = e.SuppressKeyPress = true;
+        if (CurrentProfile is not { } profile || HotkeyParser.IsModifierKey(e.KeyCode)) return;
+        if (e.KeyCode == Keys.Escape && e.Modifiers == Keys.None) { _profileList.Focus(); return; }
+        if (e.KeyCode == Keys.Back && e.Modifiers == Keys.None)
         {
-            return;
+            if (direct) { profile.TriggerKey = 0; profile.TriggerModifiers = 0; _hookKeyBox.Clear(); }
+            else { profile.Hotkey = ""; _hotkeyBox.Clear(); }
+            MarkDirty(); return;
         }
-
-        _hotkeyBox.Text = hotkey;
-        if (CurrentProfile is not null)
-        {
-            if (IsHotkeyUsedByAnotherProfile(CurrentProfile, hotkey))
-            {
-                SetStatus(UiText.DuplicateHotkey(hotkey));
-                return;
-            }
-
-            CurrentProfile.Hotkey = hotkey;
-            MarkDirty();
-        }
+        var shortcut = HotkeyParser.FromKeyEvent(e);
+        if (!HotkeyParser.TryParse(shortcut, out var modifiers, out var key, out _) || IsHotkeyUsedByAnotherProfile(profile, shortcut))
+        { SetStatus("快捷键与其他方案或停止／暂停功能重复，请重新设置"); return; }
+        if (direct) { profile.TriggerKey = (int)key; profile.TriggerModifiers = modifiers; _hookKeyBox.Text = shortcut; }
+        else { profile.Hotkey = shortcut; _hotkeyBox.Text = shortcut; }
+        MarkDirty();
     }
 
     private void TriggerTypeBox_SelectedIndexChanged(object? sender, EventArgs e)
@@ -704,19 +306,7 @@ public sealed class MainForm : Form
         MarkDirty();
     }
 
-    private void HookKeyBox_KeyDown(object? sender, KeyEventArgs e)
-    {
-        e.Handled = true;
-        var keyCode = e.KeyCode;
-        if (HotkeyParser.IsModifierKey(keyCode)) return;
-
-        _hookKeyBox.Text = keyCode.ToString();
-        if (CurrentProfile is not null)
-        {
-            CurrentProfile.TriggerKey = (int)keyCode;
-            MarkDirty();
-        }
-    }
+    private void HookKeyBox_KeyDown(object? sender, KeyEventArgs e) => CaptureShortcut(e, true);
 
     private void BindSelectedProfile()
     {
@@ -733,7 +323,7 @@ public sealed class MainForm : Form
                 MacroTriggerType.MouseButton => 2,
                 _ => 0
             };
-            _hookKeyBox.Text = profile?.TriggerKey > 0 ? ((Keys)profile.TriggerKey).ToString() : string.Empty;
+            _hookKeyBox.Text = profile?.TriggerKey > 0 ? HotkeyParser.Normalize(profile.TriggerModifiers, (uint)profile.TriggerKey) : string.Empty;
             _mouseButtonBox.SelectedIndex = profile?.TriggerMouseButton switch
             {
                 4 => 0,
@@ -744,6 +334,7 @@ public sealed class MainForm : Form
             _repeatCountBox.Value = Math.Min(_repeatCountBox.Maximum, Math.Max(_repeatCountBox.Minimum, profile?.RepeatCount ?? 1));
             _repeatIntervalBox.Value = Math.Min(_repeatIntervalBox.Maximum, Math.Max(_repeatIntervalBox.Minimum, profile?.RepeatIntervalMs ?? 0));
             _enabledCheckBox.Checked = profile?.Enabled ?? true;
+            _releaseRemoteCheck.Checked = profile?.ReleaseRemoteInput ?? false;
             _scheduleIntervalBox.Value = Math.Min(_scheduleIntervalBox.Maximum, Math.Max(_scheduleIntervalBox.Minimum, profile?.ScheduleIntervalMinutes ?? 0));
             _targetWindowBox.Text = profile?.TargetWindowTitle ?? string.Empty;
             _speedBox.Value = Math.Min(_speedBox.Maximum, Math.Max(_speedBox.Minimum, (decimal)(profile?.SpeedMultiplier ?? 1.0)));
@@ -754,6 +345,7 @@ public sealed class MainForm : Form
 
             _stepsSource.DataSource = profile?.Steps ?? [];
             _stepsSource.ResetBindings(false);
+            UpdateSummary();
         }
         finally
         {
@@ -764,15 +356,26 @@ public sealed class MainForm : Form
     private void StepList_MouseDoubleClick(object? sender, MouseEventArgs e)
     {
         var step = CurrentStep;
-        if (step is null) return;
+        if (step is null || IsCapturing) return;
 
         using var dialog = new StepEditDialog(step);
         dialog.StartPosition = FormStartPosition.CenterParent;
-        dialog.Font = new Font(Theme.UiFont, 9F);
+        dialog.Font = Theme.BodyFont;
         Theme.ApplyToForm(dialog);
 
         if (dialog.ShowDialog(this) == DialogResult.OK)
         {
+            ApplyStepEdit(step, dialog);
+            RefreshSteps();
+            _stepList.SelectedItem = step;
+            MarkDirty();
+            SetStatus(UiText.EditedStep(step.Display));
+        }
+    }
+
+    private static void ApplyStepEdit(MacroStep step, StepEditDialog dialog)
+    {
+            step.RecordedDelayMs = dialog.RecordedDelayMs;
             step.Type = dialog.StepType;
             step.X = dialog.X;
             step.Y = dialog.Y;
@@ -794,23 +397,24 @@ public sealed class MainForm : Form
             step.RunProgramArgs = dialog.RunProgramArgs;
             step.SoundFilePath = dialog.SoundFilePath;
             step.ChainMacroId = dialog.ChainMacroId;
-            RefreshSteps();
-            _stepList.SelectedItem = step;
-            MarkDirty();
-            SetStatus(UiText.EditedStep(step.Display));
-        }
     }
 
     private void StepList_MouseDown(object? sender, MouseEventArgs e)
     {
-        if (e.Button != MouseButtons.Left) return;
+        if (e.Button != MouseButtons.Left || IsCapturing) return;
+        _dragOrigin = e.Location;
         _dragStepIndex = _stepList.IndexFromPoint(e.Location);
         if (_dragStepIndex < 0) return;
-        _stepList.DoDragDrop(_stepList.Items[_dragStepIndex], DragDropEffects.Move);
+
     }
 
     private void StepList_MouseMove(object? sender, MouseEventArgs e)
     {
+        if (e.Button != MouseButtons.Left || _dragStepIndex < 0 || IsCapturing) return;
+        var size = SystemInformation.DragSize;
+        if (new Rectangle(_dragOrigin.X - size.Width / 2, _dragOrigin.Y - size.Height / 2, size.Width, size.Height).Contains(e.Location)) return;
+        _stepList.DoDragDrop(_stepList.Items[_dragStepIndex], DragDropEffects.Move);
+        _dragStepIndex = -1;
     }
 
     private void StepList_DragOver(object? sender, DragEventArgs e)
@@ -838,7 +442,9 @@ public sealed class MainForm : Form
 
     private void AddProfile()
     {
-        var profile = new MacroProfile { Name = $"{UiText.Macro} {_profiles.Count + 1}", Hotkey = GetNextDefaultHotkey(), Steps = [] };
+        if (IsCapturing) return;
+        _searchBox.Clear();
+        var profile = new MacroProfile { Name = $"{UiText.Macro} {_profiles.Count + 1}", Hotkey = GetNextDefaultHotkey(), ReleaseRemoteInput = true, Steps = [] };
         _profiles.Add(profile);
         _profilesSource.ResetBindings(false);
         _profileList.SelectedItem = profile;
@@ -848,6 +454,7 @@ public sealed class MainForm : Form
 
     private void DuplicateProfile()
     {
+        if (IsCapturing) return;
         var current = CurrentProfile;
         if (current is null) return;
 
@@ -857,22 +464,24 @@ public sealed class MainForm : Form
             Hotkey = GetNextDefaultHotkey(),
             TriggerType = current.TriggerType,
             TriggerKey = current.TriggerKey,
-            // TriggerModifiers is unused — kept in MacroModels for JSON backward compat
+            TriggerModifiers = current.TriggerModifiers,
             TriggerMouseButton = current.TriggerMouseButton,
             RepeatCount = current.RepeatCount,
             RepeatIntervalMs = current.RepeatIntervalMs,
-            Enabled = current.Enabled,
+            ReleaseRemoteInput = current.ReleaseRemoteInput,
+            Enabled = false,
             TargetWindowTitle = current.TargetWindowTitle,
             SpeedMultiplier = current.SpeedMultiplier,
             ScheduleIntervalMinutes = current.ScheduleIntervalMinutes,
             Steps = current.Steps.Select(CloneStep).ToList()
         };
 
+        _searchBox.Clear();
         _profiles.Add(copy);
         _profilesSource.ResetBindings(false);
         _profileList.SelectedItem = copy;
         MarkDirty();
-        SetStatus(UiText.DuplicatedProfile);
+        SetStatus("已复制方案，副本默认停用；设置快捷键后在运行选项启用");
     }
 
     private void DeleteProfile()
@@ -880,10 +489,13 @@ public sealed class MainForm : Form
         var current = CurrentProfile;
         if (current is null) return;
 
+        if (IsCapturing) return;
+        if (MessageBox.Show(this, $"删除方案“{current.Name}”？", "删除方案", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
+        _searchBox.Clear();
         _profiles.Remove(current);
         if (_profiles.Count == 0)
         {
-            _profiles.Add(new MacroProfile { Name = $"{UiText.Macro} 1", Hotkey = GetNextDefaultHotkey() });
+            _profiles.Add(new MacroProfile { Name = $"{UiText.Macro} 1", Hotkey = GetNextDefaultHotkey(), ReleaseRemoteInput = true });
         }
 
         _profilesSource.ResetBindings(false);
@@ -894,6 +506,7 @@ public sealed class MainForm : Form
 
     private void ImportProfile()
     {
+        if (IsCapturing) return;
         using var dialog = new OpenFileDialog
         {
             Title = UiText.ImportTitle,
@@ -913,14 +526,19 @@ public sealed class MainForm : Form
             }
 
             var normalized = MacroStore.NormalizeProfiles(imported);
+            if (normalized.GroupBy(p => p.Id).Any(g => g.Count() > 1)) throw new InvalidDataException("导入文件有重复方案 ID，请先修正后再导入。");
+            var idMap = normalized.ToDictionary(p => p.Id, _ => Guid.NewGuid().ToString("N"));
             foreach (var profile in normalized)
             {
-                profile.Id = Guid.NewGuid().ToString("N");
+                profile.Id = idMap[profile.Id];
+                profile.Enabled = false;
+                foreach (var step in profile.Steps)
+                    if (idMap.TryGetValue(step.ChainMacroId, out var replacement)) step.ChainMacroId = replacement;
                 if (string.IsNullOrWhiteSpace(profile.Hotkey))
                     profile.Hotkey = GetNextDefaultHotkey();
-                _profiles.Add(profile);
             }
-
+            _profiles.AddRange(normalized);
+            _searchBox.Clear();
             _profilesSource.ResetBindings(false);
             _profileList.SelectedIndex = _profiles.Count - 1;
             MarkDirty();
@@ -934,6 +552,7 @@ public sealed class MainForm : Form
 
     private void ExportProfile()
     {
+        if (IsCapturing) return;
         var current = CurrentProfile;
         if (current is null) return;
 
@@ -966,19 +585,22 @@ public sealed class MainForm : Form
         {
             ReapplyTheme(control);
         }
+        _profileList.ItemHeight = (int)(64 * DeviceDpi / 96f); _stepList.ItemHeight = (int)(48 * DeviceDpi / 96f); _screenMap.Invalidate();
         _profileList.Invalidate();
+        SavePreferences();
         SetStatus(Theme.IsDark ? UiText.DarkTheme : UiText.LightTheme);
     }
 
     private void ScheduleTimer_Tick(object? sender, EventArgs e)
     {
-        if (_globalPaused || _executor.IsRunning) return;
+        if (_preview || _globalPaused || _executor.IsRunning || IsCapturing || _diagnosticCheck.Checked) return;
         var now = DateTime.Now;
         foreach (var profile in _profiles)
         {
             if (!profile.Enabled || profile.ScheduleIntervalMinutes <= 0) continue;
             var next = profile.ScheduleNextRun;
-            if (next is null || now >= next.Value)
+            if (next is null) { profile.ScheduleNextRun = now.AddMinutes(profile.ScheduleIntervalMinutes); continue; }
+            if (now >= next.Value)
             {
                 profile.ScheduleNextRun = now.AddMinutes(profile.ScheduleIntervalMinutes);
                 RunMacro(profile);
@@ -999,7 +621,7 @@ public sealed class MainForm : Form
         else if (control is TextBoxBase tb)
         {
             Theme.StyleTextBox(tb);
-            if (tag == ThemeRoleMonoTextBox) tb.Font = new Font(Theme.MonoFont, 8.5F);
+            if (tag == ThemeRoleMonoTextBox) tb.Font = Theme.MonoBodyFont;
         }
         else if (control is ListBox lb)
         {
@@ -1015,12 +637,14 @@ public sealed class MainForm : Form
         }
         else if (control is Label lbl)
         {
-            if (tag == ThemeRoleSectionHeader) Theme.StyleSectionHeader(lbl);
+            if (tag == "Title") { lbl.Font = Theme.TitleFont; lbl.ForeColor = Theme.CurrentTextPrimary; }
+            else if (tag == "Body") { lbl.Font = Theme.BodyFont; lbl.ForeColor = Theme.CurrentTextSecondary; }
+            else if (tag == ThemeRoleSectionHeader) Theme.StyleSectionHeader(lbl);
             else if (tag == ThemeRoleStatus) Theme.StyleStatusBar(lbl);
             else if (tag == ThemeRoleMonoLabel) Theme.StyleMonoLabel(lbl);
             else Theme.StyleLabel(lbl);
         }
-        else if (control is TableLayoutPanel or FlowLayoutPanel or Panel)
+        else if (control is TableLayoutPanel or FlowLayoutPanel or Panel or TabPage or TabControl)
         {
             Theme.StylePanel(control);
         }
@@ -1031,51 +655,24 @@ public sealed class MainForm : Form
         }
     }
 
-    private async void PickPixelColor()
-    {
-        SetStatus(UiText.PickColorHint);
-        await Task.Delay(500);
-
-        var step = CurrentStep;
-        if (step is null) return;
-
-        var dc = NativeMethods.GetDC(0);
-        if (dc == 0) return;
-        try
-        {
-            var point = Cursor.Position;
-            var color = (int)NativeMethods.GetPixel(dc, point.X, point.Y);
-            step.PixelColor = color;
-            SetStatus(UiText.PickedColor(point.X, point.Y, color));
-            MarkDirty();
-            RefreshSteps();
-        }
-        finally
-        {
-            NativeMethods.ReleaseDC(0, dc);
-        }
-    }
-
     private async Task CapturePointAfterDelayAsync(bool addClickStep, MacroStepType stepType = MacroStepType.LeftClick)
     {
-        for (var i = 3; i >= 1; i--)
+        if (_preview || IsCapturing || _executor.IsRunning || CurrentProfile is not { } profile) return;
+        using var cts = new CancellationTokenSource(); _captureCts = cts;
+        SetCaptureEditing(false);
+        if (_hotkeys is not null) _hotkeys.Suspended = true;
+        try
         {
-            SetStatus(UiText.CountdownCapture(i));
-            await Task.Delay(1000);
+            for (var i = 3; i >= 1; i--) { SetStatus($"{i} 秒后读取鼠标位置；不会实际点击。停止按钮可取消。"); await Task.Delay(1000, cts.Token); }
+            var point = Cursor.Position;
+            if (_profiles.Contains(profile))
+            {
+                profile.Steps.Add(new() { Type = addClickStep ? stepType : MacroStepType.Move, X = point.X, Y = point.Y });
+                RefreshSteps(); MarkDirty(); SetStatus($"已添加目标 ({point.X}, {point.Y})");
+            }
         }
-
-        var point = Cursor.Position;
-
-        if (addClickStep)
-        {
-            AddStep(new MacroStep { Type = stepType, X = point.X, Y = point.Y });
-            SetStatus(UiText.RecordedClick(point.X, point.Y));
-        }
-        else
-        {
-            AddStep(new MacroStep { Type = stepType == MacroStepType.LeftClick ? MacroStepType.Move : stepType, X = point.X, Y = point.Y });
-            SetStatus(UiText.CapturedPoint(point.X, point.Y));
-        }
+        catch (OperationCanceledException) { SetStatus("已取消取点"); }
+        finally { _captureCts = null; SetCaptureEditing(true); if (_hotkeys is not null) _hotkeys.Suspended = false; SaveAll(); }
     }
 
     private void AddDelayStep()
@@ -1083,71 +680,36 @@ public sealed class MainForm : Form
         AddStep(new MacroStep { Type = MacroStepType.Delay, DelayMs = 500 });
     }
 
-    private void AddRelativeMoveStep()
+    private async void ToggleRecording()
     {
-        AddStep(new MacroStep { Type = MacroStepType.MoveRelative, X = 0, Y = 0 });
-    }
-
-    private void AddKeyComboStep()
-    {
-        AddStep(new MacroStep { Type = MacroStepType.KeyCombo, KeyCode = (int)Keys.C, KeyModifiers = NativeMethods.ModControl });
-    }
-
-    private void AddTypeTextStep()
-    {
-        AddStep(new MacroStep { Type = MacroStepType.TypeText, TextToType = "Hello" });
-    }
-
-    private void AddWaitPixelStep()
-    {
-        var point = Cursor.Position;
-        AddStep(new MacroStep { Type = MacroStepType.WaitPixel, X = point.X, Y = point.Y, PixelColor = 0xFFFFFF, PixelTolerance = 10, PixelTimeoutMs = 5000 });
-    }
-
-    private void AddFindPixelStep()
-    {
-        var point = Cursor.Position;
-        AddStep(new MacroStep { Type = MacroStepType.FindPixel, X = point.X, Y = point.Y, SearchWidth = 100, SearchHeight = 100, PixelColor = 0xFFFFFF, PixelTolerance = 10, PixelTimeoutMs = 5000 });
-    }
-
-    private void AddScreenshotStep()
-    {
-        AddStep(new MacroStep { Type = MacroStepType.Screenshot, X = 0, Y = 0, SearchWidth = 1920, SearchHeight = 1080 });
-    }
-
-    private void ToggleRecording()
-    {
-        if (_recorder is null) return;
-
-        if (_recorder.IsRecording)
+        if (_preview || _recorder is null) return;
+        if (_recorder.IsRecording || _startingRecording) { StopAll(); return; }
+        if (_executor.IsRunning || _captureCts is not null || CurrentProfile is not { } profile) return;
+        _startingRecording = true; _recordingProfile = profile;
+        SetCaptureEditing(false);
+        if (_hotkeys is not null) _hotkeys.Suspended = true;
+        using var cts = new CancellationTokenSource(); _captureCts = cts;
+        try
         {
-            var steps = _recorder.Stop();
-            _recordingProfile = null;
-            SetStatus(UiText.RecordingStopped(steps.Count));
+            for (var i = 3; i >= 1; i--) { _recordButton.Text = $"取消倒计时 {i}"; SetStatus($"{i} 秒后录制；Ctrl+Alt+F10 停止。将追加到当前方案。"); await Task.Delay(1000, cts.Token); }
+            _recorder.Start(_recordKeyboardCheck.Checked, Handle);
+            _recordClock.Restart(); _recordUiTimer.Start();
+            _profileList.Enabled = false; _workspaceTabs.Enabled = true;
+            _recordButton.Text = "■  停止录制"; SetStatus("正在录制操作与真实间隔 · Ctrl+Alt+F10 停止");
         }
-        else
+        catch (OperationCanceledException) { _recordingProfile = null; }
+        catch (Exception ex) { _recordingProfile = null; SetStatus(ex.Message); Log(ex.Message); }
+        finally
         {
-            var profile = CurrentProfile;
-            if (profile is null) return;
-            try
-            {
-                _recordingProfile = profile;
-                _recorder.Start();
-                SetStatus(UiText.RecordingStarted);
-            }
-            catch (InvalidOperationException ex)
-            {
-                _recordingProfile = null;
-                SetStatus(ex.Message);
-                Log($"{UiText.Error}: {ex.Message}");
-            }
+            _captureCts = null; _startingRecording = false;
+            if (!_recorder.IsRecording) { SetCaptureEditing(true); _recordButton.Text = "●  录制操作"; if (_hotkeys is not null) _hotkeys.Suspended = false; SaveAll(); }
         }
     }
 
     private void AddStep(MacroStep step)
     {
         var profile = CurrentProfile;
-        if (profile is null) return;
+        if (profile is null || IsCapturing) return;
 
         profile.Steps.Add(step);
         RefreshSteps();
@@ -1161,6 +723,7 @@ public sealed class MainForm : Form
 
     private void MoveStep(int direction)
     {
+        if (IsCapturing) return;
         var profile = CurrentProfile;
         var step = CurrentStep;
         if (profile is null || step is null) return;
@@ -1178,6 +741,7 @@ public sealed class MainForm : Form
 
     private void DeleteStep()
     {
+        if (IsCapturing) return;
         var profile = CurrentProfile;
         var step = CurrentStep;
         if (profile is null || step is null) return;
@@ -1190,6 +754,7 @@ public sealed class MainForm : Form
 
     private void DuplicateStep()
     {
+        if (IsCapturing) return;
         var profile = CurrentProfile;
         var step = CurrentStep;
         if (profile is null || step is null) return;
@@ -1206,6 +771,7 @@ public sealed class MainForm : Form
 
     private void FilterProfiles()
     {
+        if (IsCapturing) return;
         var filter = _searchBox.Text.Trim();
         if (string.IsNullOrEmpty(filter))
         {
@@ -1214,7 +780,7 @@ public sealed class MainForm : Form
         else
         {
             _profilesSource.DataSource = _profiles
-                .Where(p => p.Name.Contains(filter, StringComparison.OrdinalIgnoreCase))
+                .Where(p => p.Name.Contains(filter, StringComparison.OrdinalIgnoreCase) || p.ShortcutText.Contains(filter, StringComparison.OrdinalIgnoreCase))
                 .ToList();
         }
         _profilesSource.ResetBindings(false);
@@ -1224,10 +790,13 @@ public sealed class MainForm : Form
 
     private void TestRun()
     {
+        if (_preview || IsCapturing || _diagnosticCheck.Checked) return;
         var profile = CurrentProfile;
         if (profile is null) return;
+        if (profile.RepeatCount == 0 && _hotkeys?.StopAvailable != true)
+        { SetStatus("停止快捷键不可用，暂不执行持续循环。请先处理快捷键冲突。"); return; }
 
-        if (_executor.IsRunning)
+        if (_executor.IsRunning || _executionCts is not null)
         {
             SetStatus(UiText.AlreadyRunning);
             return;
@@ -1239,32 +808,43 @@ public sealed class MainForm : Form
 
     private void SaveAndReload()
     {
-        SaveAll();
-        RebuildHotkeys();
+        SaveAll(); RebuildHotkeys(true);
     }
-
-    private void SaveAll()
+    private bool SaveAll(bool force = false)
     {
-        if (!_dirty) return;
-        _store.Save(_profiles);
-        _dirty = false;
+        _saveTimer.Stop();
+        if (!_dirty || _preview) return true;
+        if (IsCapturing && !force) return false;
+        try { _store.Save(_profiles); _dirty = false; _saveState.Text = "已自动保存"; RebuildHotkeys(); return true; }
+        catch (Exception ex)
+        {
+            _saveState.Text = "保存失败 · Ctrl+S 重试"; SetStatus(ex.Message); Log(ex.Message);
+            _saveTimer.Interval = 5000; _saveTimer.Start(); return false;
+        }
     }
-
     private void MarkDirty()
     {
-        _dirty = true;
+        if (_preview) return;
+        _dirty = true; _saveState.Text = "正在编辑…"; _profileList.Invalidate(); UpdateSummary();
+        _saveTimer.Stop(); _saveTimer.Interval = 700; if (!IsCapturing) _saveTimer.Start();
     }
-
-    private void RebuildHotkeys()
+    private void RebuildHotkeys() => RebuildHotkeys(false);
+    private void RebuildHotkeys(bool force)
     {
-        if (_hotkeys is null) return;
-        var errors = _hotkeys.RegisterAll(_profiles);
-        SetStatus(errors.Count == 0 ? UiText.Ready(_hotkeys.RegisteredCount, _store.FilePath) : string.Join(" | ", errors));
+        ConfigureExternalTrigger();
+        if (_hotkeys is null || IsCapturing || _hotkeyBox.Focused || _hookKeyBox.Focused) return;
+        var errors = _hotkeys.RegisterAll(_profiles, _rawInputCheck.Checked, force);
+        _backendLabel.Text = _hotkeys.BackendStatus;
+        foreach (var error in errors) Log(error);
+        SetStatus(errors.Count == 0 ? $"就绪 · {_hotkeys.RegisteredCount} 个方案可用 · Ctrl+Alt+F10 停止" : string.Join(" | ", errors));
     }
 
     private void RunMacro(MacroProfile profile)
     {
-        if (_executor.IsRunning)
+        if (_preview || IsCapturing || _globalPaused || _diagnosticCheck.Checked) return;
+        if (profile.RepeatCount == 0 && _hotkeys?.StopAvailable != true)
+        { SetStatus("停止快捷键不可用，暂不执行持续循环。请先在诊断页处理快捷键冲突。"); return; }
+        if (_executor.IsRunning || _executionCts is not null)
         {
             SetStatus(UiText.AlreadyRunning);
             return;
@@ -1277,17 +857,26 @@ public sealed class MainForm : Form
 
     private async Task RunWithCancellationAsync(MacroProfile profile)
     {
-        var current = profile;
+        var current = CloneProfile(profile);
         for (var chainDepth = 0; chainDepth < MaxChainDepth; chainDepth++)
         {
             using var cts = new CancellationTokenSource();
             _executionCts = cts;
-            _cancelButton.Visible = true;
+            _cancelButton.Enabled = true;
             var completed = false;
             var canceled = false;
 
             try
             {
+                // Do not turn the triggering Shift/Ctrl/Alt chord into a modified click.
+                var releaseDeadline = Environment.TickCount64 + 1500;
+                while (AnyModifierHeld())
+                {
+                    cts.Token.ThrowIfCancellationRequested();
+                    if (Environment.TickCount64 >= releaseDeadline) throw new InvalidOperationException("请先松开 Ctrl / Alt / Shift / Win，再运行方案");
+                    await Task.Delay(10, cts.Token);
+                }
+                await DesktopSwitcher.PrepareAsync(current, cts.Token, Log);
                 await _executor.RunAsync(current, cts.Token);
                 completed = true;
                 PostToUi(() =>
@@ -1321,14 +910,14 @@ public sealed class MainForm : Form
 
             if (!completed || canceled)
             {
-                PostToUi(() => _cancelButton.Visible = false);
+                PostToUi(() => _cancelButton.Enabled = true);
                 return;
             }
 
             var chainId = _executor.ConsumeChainMacroId();
             if (string.IsNullOrWhiteSpace(chainId))
             {
-                PostToUi(() => _cancelButton.Visible = false);
+                PostToUi(() => _cancelButton.Enabled = true);
                 return;
             }
 
@@ -1339,7 +928,7 @@ public sealed class MainForm : Form
                 {
                     SetStatus(UiText.ChainSkipped(current.Name));
                     Log(UiText.ChainSkipped(current.Name));
-                    _cancelButton.Visible = false;
+                    _cancelButton.Enabled = true;
                 });
                 return;
             }
@@ -1349,25 +938,27 @@ public sealed class MainForm : Form
                 SetStatus(UiText.Chaining(target.Name));
                 Log(UiText.Chaining(target.Name));
             });
-            current = target;
+            current = CloneProfile(target);
         }
 
         PostToUi(() =>
         {
             SetStatus(UiText.ChainSkipped(current.Name));
             Log(UiText.ChainSkipped(current.Name));
-            _cancelButton.Visible = false;
+            _cancelButton.Enabled = true;
         });
     }
 
     private void CancelExecution()
     {
         _executionCts?.Cancel();
+        _executor.Cancel();
     }
 
     private void RefreshSteps()
     {
         var selected = CurrentStep;
+        UpdateSummary();
         _stepsSource.DataSource = null;
         _stepsSource.DataSource = CurrentProfile?.Steps ?? [];
         _stepsSource.ResetBindings(false);
@@ -1377,30 +968,11 @@ public sealed class MainForm : Form
         }
     }
 
-    private void RefreshScreenInfo()
-    {
-        var virtualScreen = SystemInformation.VirtualScreen;
-        var lines = new List<string>
-        {
-            $"Virtual: X={virtualScreen.X}, Y={virtualScreen.Y}, W={virtualScreen.Width}, H={virtualScreen.Height}",
-            $"Mouse: X={Cursor.Position.X}, Y={Cursor.Position.Y}",
-            UiText.AdminBoundary
-        };
-
-        for (var i = 0; i < Screen.AllScreens.Length; i++)
-        {
-            var screen = Screen.AllScreens[i];
-            var bounds = screen.Bounds;
-            lines.Add($"Screen {i + 1}{(screen.Primary ? " Primary" : "")}: X={bounds.X}, Y={bounds.Y}, W={bounds.Width}, H={bounds.Height}");
-        }
-
-        _screenInfoBox.Text = string.Join(Environment.NewLine, lines);
-    }
-
     private void UpdateLivePosition()
     {
+        if (!Visible || WindowState == FormWindowState.Minimized) return;
         var point = Cursor.Position;
-        _livePositionLabel.Text = $"X={point.X}, Y={point.Y}";
+        _livePositionLabel.Text = $"鼠标  {point.X}, {point.Y}";
     }
 
     private void PostToUi(Action action)
@@ -1409,8 +981,7 @@ public sealed class MainForm : Form
         if (!IsHandleCreated) return;
         try
         {
-            if (InvokeRequired) BeginInvoke(action);
-            else action();
+            BeginInvoke(action);
         }
         catch (ObjectDisposedException)
         {
@@ -1436,6 +1007,7 @@ public sealed class MainForm : Form
     {
         return new MacroStep
         {
+            RecordedDelayMs = step.RecordedDelayMs,
             Type = step.Type,
             X = step.X,
             Y = step.Y,
@@ -1477,7 +1049,8 @@ public sealed class MainForm : Form
 
     private string GetNextDefaultHotkey()
     {
-        var used = _profiles.Select(static profile => (profile.Hotkey ?? string.Empty).Trim()).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var used = _profiles.Select(static p => p.ShortcutText.Trim()).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        used.Add(HotkeyService.StopShortcut); used.Add(HotkeyService.PauseShortcut);
         var candidates = new[] { "Alt+Z", "Alt+X", "Alt+C", "Alt+V", "Ctrl+Alt+Z", "Ctrl+Alt+X", "Ctrl+Alt+C", "Ctrl+Alt+V" };
         foreach (var candidate in candidates)
         {
@@ -1507,9 +1080,10 @@ public sealed class MainForm : Form
         }
 
         var normalized = HotkeyParser.Normalize(modifiers, key);
+        if (normalized == HotkeyParser.Normalize(3, (uint)Keys.F10) || normalized == HotkeyParser.Normalize(3, (uint)Keys.P)) return true;
         foreach (var profile in _profiles)
         {
-            if (profile.Id == currentProfile.Id || !HotkeyParser.TryParse(profile.Hotkey, out var otherModifiers, out var otherKey, out _))
+            if (profile.Id == currentProfile.Id || profile.TriggerType == MacroTriggerType.MouseButton || !HotkeyParser.TryParse(profile.ShortcutText, out var otherModifiers, out var otherKey, out _))
             {
                 continue;
             }
@@ -1527,6 +1101,11 @@ public sealed class MainForm : Form
 internal sealed class StepEditDialog : Form
 {
     private readonly ComboBox _typeBox = new();
+    private readonly TableLayoutPanel _fields;
+    private readonly NumericUpDown _recordedDelayBox = new() { Minimum = 0, Maximum = 86400000 };
+    private readonly bool _hasRecordedTiming;
+    private bool _dialogScaled;
+    public int? RecordedDelayMs => _hasRecordedTiming ? (int)_recordedDelayBox.Value : null;
     private readonly NumericUpDown _xBox = new() { Minimum = -100000, Maximum = 100000 };
     private readonly NumericUpDown _yBox = new() { Minimum = -100000, Maximum = 100000 };
     private readonly NumericUpDown _delayBox = new() { Minimum = 0, Maximum = 600000, Increment = 50 };
@@ -1631,7 +1210,7 @@ internal sealed class StepEditDialog : Form
     public int SearchWidth => (int)_searchWBox.Value;
     public int SearchHeight => (int)_searchHBox.Value;
     public int DelayMsMax => (int)_delayMaxBox.Value;
-    public int JumpToStepIndex => (int)_jumpToStepBox.Value;
+    public int JumpToStepIndex => (int)_jumpToStepBox.Value - 1;
     public string RunProgramPath => _runProgramPathBox.Text;
     public string RunProgramArgs => _runProgramArgsBox.Text;
     public string SoundFilePath => _soundFilePathBox.Text;
@@ -1640,20 +1219,26 @@ internal sealed class StepEditDialog : Form
     public StepEditDialog(MacroStep step)
     {
         Text = UiText.EditStepTitle;
-        Size = new Size(420, 560);
+        _hasRecordedTiming = step.RecordedDelayMs.HasValue;
+        Size = new Size(540, 620);
+        Font = Theme.BodyFont;
+        Theme.ApplyToForm(this);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
         KeyPreview = true;
         AutoScroll = true;
 
-        var panel = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(16), ColumnCount = 2, RowCount = 23 };
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 80));
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 1, Padding = new Padding(16) };
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); root.RowStyles.Add(new RowStyle(SizeType.Absolute, 56));
+        Controls.Add(root);
+        var scroll = new Panel { Dock = DockStyle.Fill, AutoScroll = true };
+        root.Controls.Add(scroll, 0, 0);
+        var panel = _fields = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2, RowCount = 22 };
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 138));
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        for (var i = 0; i < 22; i++)
-            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
-        panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        Controls.Add(panel);
+        for (var i = 0; i < 22; i++) panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        scroll.Controls.Add(panel);
 
         _typeBox.DropDownStyle = ComboBoxStyle.DropDownList;
         _typeBox.Items.AddRange([
@@ -1690,7 +1275,7 @@ internal sealed class StepEditDialog : Form
             _ => 0
         };
         _typeBox.Dock = DockStyle.Fill;
-        _typeBox.SelectedIndexChanged += (_, _) => UpdateFieldVisibility();
+
         Theme.StyleComboBox(_typeBox);
 
         _xBox.Value = Math.Min(_xBox.Maximum, Math.Max(_xBox.Minimum, step.X));
@@ -1725,14 +1310,16 @@ internal sealed class StepEditDialog : Form
         keyNames.AddRange([Keys.F1, Keys.F2, Keys.F3, Keys.F4, Keys.F5, Keys.F6, Keys.F7, Keys.F8, Keys.F9, Keys.F10, Keys.F11, Keys.F12,
             Keys.Escape, Keys.Tab, Keys.Space, Keys.Enter, Keys.Back, Keys.Delete, Keys.Insert,
             Keys.Home, Keys.End, Keys.PageUp, Keys.PageDown, Keys.Up, Keys.Down, Keys.Left, Keys.Right]);
-        _keyPressBox.DataSource = keyNames;
+        for (var k = (int)Keys.F13; k <= (int)Keys.F24; k++) keyNames.Add((Keys)k);
+        if (step.KeyCode > 0 && !keyNames.Contains((Keys)step.KeyCode)) keyNames.Add((Keys)step.KeyCode);
+        _keyPressBox.Items.AddRange(keyNames.Cast<object>().ToArray());
         var keyIdx = keyNames.IndexOf((Keys)step.KeyCode);
         _keyPressBox.SelectedIndex = keyIdx >= 0 ? keyIdx : 0;
         Theme.StyleComboBox(_keyPressBox);
 
         _keyComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
         _keyComboBox.Dock = DockStyle.Fill;
-        _keyComboBox.DataSource = new List<Keys>(keyNames);
+        _keyComboBox.Items.AddRange(keyNames.Cast<object>().ToArray());
         var comboKeyIdx = keyNames.IndexOf((Keys)step.KeyCode);
         _keyComboBox.SelectedIndex = comboKeyIdx >= 0 ? comboKeyIdx : 0;
         Theme.StyleComboBox(_keyComboBox);
@@ -1740,7 +1327,7 @@ internal sealed class StepEditDialog : Form
         _modifierCheckList.Dock = DockStyle.Fill;
         _modifierCheckList.Items.AddRange(["Ctrl", "Alt", "Shift", "Win"]);
         _modifierCheckList.CheckOnClick = true;
-        _modifierCheckList.Height = 36;
+        _modifierCheckList.Height = 94;
         if ((step.KeyModifiers & NativeMethods.ModControl) != 0) _modifierCheckList.SetItemChecked(0, true);
         if ((step.KeyModifiers & NativeMethods.ModAlt) != 0) _modifierCheckList.SetItemChecked(1, true);
         if ((step.KeyModifiers & NativeMethods.ModShift) != 0) _modifierCheckList.SetItemChecked(2, true);
@@ -1748,7 +1335,7 @@ internal sealed class StepEditDialog : Form
         _modifierCheckList.BackColor = Theme.CurrentInputBg;
         _modifierCheckList.ForeColor = Theme.CurrentTextPrimary;
         _modifierCheckList.BorderStyle = BorderStyle.FixedSingle;
-        _modifierCheckList.Font = new Font(Theme.UiFont, 9F);
+        _modifierCheckList.Font = Theme.BodyFont;
 
         _typeTextBox.Dock = DockStyle.Fill;
         _typeTextBox.Text = step.TextToType;
@@ -1778,7 +1365,7 @@ internal sealed class StepEditDialog : Form
         _delayMaxBox.Dock = DockStyle.Fill;
         Theme.StyleNumericUpDown(_delayMaxBox);
 
-        _jumpToStepBox.Value = Math.Min(_jumpToStepBox.Maximum, Math.Max(_jumpToStepBox.Minimum, Math.Max(0, step.JumpToStepIndex)));
+        _jumpToStepBox.Value = Math.Min(_jumpToStepBox.Maximum, Math.Max(_jumpToStepBox.Minimum, Math.Max(0, step.JumpToStepIndex + 1)));
         _jumpToStepBox.Dock = DockStyle.Fill;
         Theme.StyleNumericUpDown(_jumpToStepBox);
 
@@ -1835,7 +1422,9 @@ internal sealed class StepEditDialog : Form
         panel.Controls.Add(_wheelLabel, 0, 6);
         panel.Controls.Add(_wheelDeltaBox, 1, 6);
         panel.Controls.Add(_keyLabel, 0, 7);
-        panel.Controls.Add(_keyPressBox, 1, 7);
+        var keyPanel = new Panel { Dock = DockStyle.Fill, Height = 34 };
+        keyPanel.Controls.Add(_keyPressBox); keyPanel.Controls.Add(_keyComboBox);
+        panel.Controls.Add(keyPanel, 1, 7);
         panel.Controls.Add(_modifierLabel, 0, 8);
         panel.Controls.Add(_modifierCheckList, 1, 8);
         panel.Controls.Add(_textLabel, 0, 9);
@@ -1876,12 +1465,21 @@ internal sealed class StepEditDialog : Form
 
         buttonPanel.Controls.Add(cancelBtn);
         buttonPanel.Controls.Add(okBtn);
-        panel.Controls.Add(buttonPanel, 1, 21);
+        var timingLabel = CreateDialogLabel("录制间隔（毫秒）");
+        _recordedDelayBox.Value = step.RecordedDelayMs ?? 0;
+        _recordedDelayBox.Dock = DockStyle.Fill; Theme.StyleNumericUpDown(_recordedDelayBox);
+        timingLabel.Visible = _recordedDelayBox.Visible = _hasRecordedTiming;
+        panel.Controls.Add(timingLabel, 0, 21); panel.Controls.Add(_recordedDelayBox, 1, 21);
+        root.Controls.Add(buttonPanel, 0, 1);
+        foreach (Control field in panel.Controls) field.Margin = new Padding(4, 7, 4, 7);
+        _typeBox.SelectedIndexChanged += (_, _) => UpdateFieldVisibility();
 
         AcceptButton = okBtn;
         CancelButton = cancelBtn;
 
         UpdateFieldVisibility();
+        AutoScaleMode = AutoScaleMode.Dpi; AutoScaleDimensions = new SizeF(96, 96); PerformAutoScale();
+        _dialogScaled = true;
     }
 
     private void UpdateFieldVisibility()
@@ -1926,11 +1524,24 @@ internal sealed class StepEditDialog : Form
         _runProgramArgsLabel.Visible = _runProgramArgsBox.Visible = isRunProgram;
         _soundFileLabel.Visible = _soundFilePathBox.Visible = isPlaySound;
         _chainMacroIdLabel.Visible = _chainMacroIdBox.Visible = isChainMacro;
+        if (_fields is not null)
+        {
+            var visibleRows = new[] { true, isClick || isMove || isDrag || isPixel || isScreenshot,
+                isClick || isMove || isDrag || isPixel || isScreenshot, isDelay || isRandomDelay,
+                isDrag, isDrag, isWheel, isKey, isCombo, isTypeText, isPixel, isPixel,
+                isPixel, isFindPixel || isScreenshot, isFindPixel || isScreenshot, isRandomDelay,
+                isJumpIfPixel, isRunProgram, isRunProgram, isPlaySound, isChainMacro, _hasRecordedTiming };
+            for (var i = 0; i < visibleRows.Length; i++)
+            {
+                _fields.RowStyles[i].SizeType = SizeType.Absolute;
+                _fields.RowStyles[i].Height = visibleRows[i] ? (i == 8 ? 108 : 48) * (_dialogScaled ? DeviceDpi / 96f : 1) : 0;
+            }
+        }
     }
 
     private static Label CreateDialogLabel(string text)
     {
-        var label = new Label { Text = text, TextAlign = ContentAlignment.MiddleLeft };
+        var label = new Label { Text = text, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
         Theme.StyleLabel(label);
         return label;
     }

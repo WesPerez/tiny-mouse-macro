@@ -20,3 +20,6 @@ macros.json.broken-*
 .vs/
 .idea/
 .vscode/
+
+artifacts/
+macros.json.backup

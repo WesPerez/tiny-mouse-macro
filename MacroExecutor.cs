@@ -27,7 +27,7 @@ public sealed class MacroExecutor
 
     public void Cancel()
     {
-        _loopCts?.Cancel();
+        lock (_lock) _loopCts?.Cancel();
     }
 
     public event Action<string>? ChainMacroRequested;
@@ -51,12 +51,13 @@ public sealed class MacroExecutor
                 return Task.CompletedTask;
             }
 
+            _loopCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             _isRunning = true;
             _pendingChainMacroId = null;
         }
 
-        _loopCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var linkedToken = _loopCts.Token;
+        var runCts = _loopCts!;
+        var linkedToken = runCts.Token;
 
         return Task.Run(async () =>
         {
@@ -68,11 +69,10 @@ public sealed class MacroExecutor
             {
                 lock (_lock)
                 {
+                    runCts.Dispose();
+                    _loopCts = null;
                     _isRunning = false;
                 }
-
-                _loopCts?.Dispose();
-                _loopCts = null;
             }
         });
     }
@@ -93,6 +93,9 @@ public sealed class MacroExecutor
             ct.ThrowIfCancellationRequested();
             FocusTargetWindow(targetWindowTitle);
 
+            var timing = Stopwatch.StartNew();
+            double targetTimeMs = 0;
+            var previousRecorded = false;
             for (var index = 0; index < steps.Length; index++)
             {
                 ct.ThrowIfCancellationRequested();
@@ -102,7 +105,16 @@ public sealed class MacroExecutor
                     throw new InvalidOperationException($"Macro stopped after {MaxExecutedStepsPerRun:N0} executed steps. Check conditional jumps for an accidental loop.");
                 }
 
-                var result = await ExecuteStepAsync(steps[index], speedMultiplier, ct);
+                var step = steps[index];
+                if (step.RecordedDelayMs is int recordedDelay)
+                {
+                    if (!previousRecorded) targetTimeMs = timing.Elapsed.TotalMilliseconds;
+                    targetTimeMs += recordedDelay / speedMultiplier;
+                    var remaining = targetTimeMs - timing.Elapsed.TotalMilliseconds;
+                    if (remaining > 0) await Task.Delay(TimeSpan.FromMilliseconds(remaining), ct);
+                }
+                previousRecorded = step.RecordedDelayMs.HasValue;
+                var result = await ExecuteStepAsync(step, speedMultiplier, ct);
                 if (result.JumpToIndex.HasValue)
                 {
                     var jumpIndex = result.JumpToIndex.Value;
@@ -112,7 +124,7 @@ public sealed class MacroExecutor
                     }
                 }
 
-                await DelayMs(20, speedMultiplier, ct);
+                if (!step.RecordedDelayMs.HasValue) await DelayMs(20, speedMultiplier, ct);
             }
 
             iteration++;
@@ -208,16 +220,19 @@ public sealed class MacroExecutor
                 }
                 break;
             case MacroStepType.MouseWheel:
-                NativeMethods.mouse_event(NativeMethods.MouseEventFWheel, 0, 0, unchecked((uint)step.WheelDelta), 0);
+                NativeMethods.mouse_event(NativeMethods.MouseEventFWheel, 0, 0, unchecked((uint)step.WheelDelta), NativeMethods.MacroInputTag);
                 break;
             case MacroStepType.Drag:
                 NativeMethods.SetCursorPos(step.X, step.Y);
                 await DelayMs(35, speedMultiplier, ct);
-                NativeMethods.mouse_event(NativeMethods.MouseEventFLeftDown, 0, 0, 0, 0);
-                await DelayMs(35, speedMultiplier, ct);
-                NativeMethods.SetCursorPos(step.DragEndX, step.DragEndY);
-                await DelayMs(35, speedMultiplier, ct);
-                NativeMethods.mouse_event(NativeMethods.MouseEventFLeftUp, 0, 0, 0, 0);
+                NativeMethods.mouse_event(NativeMethods.MouseEventFLeftDown, 0, 0, 0, NativeMethods.MacroInputTag);
+                try
+                {
+                    await DelayMs(35, speedMultiplier, ct);
+                    NativeMethods.SetCursorPos(step.DragEndX, step.DragEndY);
+                    await DelayMs(35, speedMultiplier, ct);
+                }
+                finally { NativeMethods.mouse_event(NativeMethods.MouseEventFLeftUp, 0, 0, 0, NativeMethods.MacroInputTag); }
                 break;
         }
 
@@ -240,9 +255,9 @@ public sealed class MacroExecutor
     {
         NativeMethods.SetCursorPos(x, y);
         await DelayMs(35, speedMultiplier, ct);
-        NativeMethods.mouse_event(downFlag, 0, 0, 0, 0);
-        await DelayMs(35, speedMultiplier, ct);
-        NativeMethods.mouse_event(upFlag, 0, 0, 0, 0);
+        NativeMethods.mouse_event(downFlag, 0, 0, 0, NativeMethods.MacroInputTag);
+        try { await DelayMs(35, speedMultiplier, ct); }
+        finally { NativeMethods.mouse_event(upFlag, 0, 0, 0, NativeMethods.MacroInputTag); }
     }
 
     private static async Task DelayMs(int ms, double speedMultiplier, CancellationToken ct)
@@ -266,8 +281,8 @@ public sealed class MacroExecutor
         if (keyCode is <= 0 or > byte.MaxValue) return;
 
         var key = (byte)keyCode;
-        NativeMethods.keybd_event(key, 0, 0, 0);
-        NativeMethods.keybd_event(key, 0, NativeMethods.KeyeventfKeyup, 0);
+        NativeMethods.keybd_event(key, 0, 0, NativeMethods.MacroInputTag);
+        NativeMethods.keybd_event(key, 0, NativeMethods.KeyeventfKeyup, NativeMethods.MacroInputTag);
     }
 
     private static async Task SendKeyCombo(uint modifiers, int keyCode, double speedMultiplier, CancellationToken ct)
@@ -275,27 +290,25 @@ public sealed class MacroExecutor
         if (keyCode is <= 0 or > byte.MaxValue) return;
 
         var key = (byte)keyCode;
-        if ((modifiers & NativeMethods.ModControl) != 0)
-            NativeMethods.keybd_event((byte)Keys.ControlKey, 0, 0, 0);
-        if ((modifiers & NativeMethods.ModAlt) != 0)
-            NativeMethods.keybd_event((byte)Keys.Menu, 0, 0, 0);
-        if ((modifiers & NativeMethods.ModShift) != 0)
-            NativeMethods.keybd_event((byte)Keys.ShiftKey, 0, 0, 0);
-        if ((modifiers & NativeMethods.ModWin) != 0)
-            NativeMethods.keybd_event((byte)Keys.LWin, 0, 0, 0);
-
-        NativeMethods.keybd_event(key, 0, 0, 0);
-        await DelayMs(35, speedMultiplier, ct);
-        NativeMethods.keybd_event(key, 0, NativeMethods.KeyeventfKeyup, 0);
-
-        if ((modifiers & NativeMethods.ModWin) != 0)
-            NativeMethods.keybd_event((byte)Keys.LWin, 0, NativeMethods.KeyeventfKeyup, 0);
-        if ((modifiers & NativeMethods.ModShift) != 0)
-            NativeMethods.keybd_event((byte)Keys.ShiftKey, 0, NativeMethods.KeyeventfKeyup, 0);
-        if ((modifiers & NativeMethods.ModAlt) != 0)
-            NativeMethods.keybd_event((byte)Keys.Menu, 0, NativeMethods.KeyeventfKeyup, 0);
-        if ((modifiers & NativeMethods.ModControl) != 0)
-            NativeMethods.keybd_event((byte)Keys.ControlKey, 0, NativeMethods.KeyeventfKeyup, 0);
+        var held = new List<byte>();
+        try
+        {
+            foreach (var (mask, modifier) in new[] { (2u, Keys.ControlKey), (1u, Keys.Menu), (4u, Keys.ShiftKey), (8u, Keys.LWin) })
+            {
+                if ((modifiers & mask) == 0 || (NativeMethods.GetAsyncKeyState((int)modifier) & 0x8000) != 0 ||
+                    (modifier == Keys.LWin && (NativeMethods.GetAsyncKeyState((int)Keys.RWin) & 0x8000) != 0)) continue;
+                NativeMethods.keybd_event((byte)modifier, 0, 0, NativeMethods.MacroInputTag);
+                held.Add((byte)modifier);
+            }
+            NativeMethods.keybd_event(key, 0, 0, NativeMethods.MacroInputTag);
+            try { await DelayMs(35, speedMultiplier, ct); }
+            finally { NativeMethods.keybd_event(key, 0, NativeMethods.KeyeventfKeyup, NativeMethods.MacroInputTag); }
+        }
+        finally
+        {
+            for (var i = held.Count - 1; i >= 0; i--)
+                NativeMethods.keybd_event(held[i], 0, NativeMethods.KeyeventfKeyup, NativeMethods.MacroInputTag);
+        }
     }
 
     private static void SendChar(char c)
@@ -313,7 +326,7 @@ public sealed class MacroExecutor
                     WScan = c,
                     DwFlags = NativeMethods.KeyeventfUnicode,
                     Time = 0,
-                    DwExtraInfo = 0
+                    DwExtraInfo = (nint)NativeMethods.MacroInputTag
                 }
             }
         };
@@ -329,7 +342,7 @@ public sealed class MacroExecutor
                     WScan = c,
                     DwFlags = NativeMethods.KeyeventfUnicode | NativeMethods.KeyeventfKeyup,
                     Time = 0,
-                    DwExtraInfo = 0
+                    DwExtraInfo = (nint)NativeMethods.MacroInputTag
                 }
             }
         };

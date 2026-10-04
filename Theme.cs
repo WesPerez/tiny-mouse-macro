@@ -4,12 +4,12 @@ internal static class Theme
 {
     public static bool IsDark { get; private set; }
 
-    public static readonly Color Bg = Color.FromArgb(0xE8, 0xF4, 0xFD);
-    public static readonly Color Surface = Color.FromArgb(0xD6, 0xEC, 0xFB);
-    public static readonly Color Card = Color.FromArgb(0xC4, 0xE2, 0xF7);
-    public static readonly Color Border = Color.FromArgb(0xA0, 0xCC, 0xE8);
-    public static readonly Color Accent = Color.FromArgb(0x1A, 0x8F, 0xD4);
-    public static readonly Color AccentDim = Color.FromArgb(0x14, 0x70, 0xA8);
+    public static readonly Color Bg = Color.FromArgb(0xF4, 0xF6, 0xFA);
+    public static readonly Color Surface = Color.FromArgb(0xEA, 0xEE, 0xF5);
+    public static readonly Color Card = Color.FromArgb(0xE1, 0xE8, 0xF3);
+    public static readonly Color Border = Color.FromArgb(0xD7, 0xDF, 0xEC);
+    public static readonly Color Accent = Color.FromArgb(0x35, 0x61, 0xD8);
+    public static readonly Color AccentDim = Color.FromArgb(0x28, 0x49, 0xB0);
     public static readonly Color TextPrimary = Color.FromArgb(0x1A, 0x2A, 0x3A);
     public static readonly Color TextSecondary = Color.FromArgb(0x4A, 0x5E, 0x72);
     public static readonly Color TextMuted = Color.FromArgb(0x7A, 0x8E, 0xA2);
@@ -18,8 +18,8 @@ internal static class Theme
     public static readonly Color Danger = Color.FromArgb(0xD4, 0x30, 0x3A);
     public static readonly Color InputBg = Color.White;
     public static readonly Color ListBg = Color.White;
-    public static readonly Color ListSelected = Color.FromArgb(0x1A, 0x8F, 0xD4);
-    public static readonly Color ListSelectedBg = Color.FromArgb(0xD6, 0xEC, 0xFB);
+    public static readonly Color ListSelected = Color.FromArgb(0x35, 0x61, 0xD8);
+    public static readonly Color ListSelectedBg = Color.FromArgb(0xEA, 0xEE, 0xF5);
 
     public static readonly FontFamily UiFont = new FontFamily("Microsoft YaHei UI");
     public static readonly FontFamily MonoFont = new FontFamily("Consolas");
@@ -37,6 +37,13 @@ internal static class Theme
     public static Color CurrentListBg => IsDark ? Color.FromArgb(0x2A, 0x2A, 0x3C) : ListBg;
     public static Color CurrentListSelected => IsDark ? Color.FromArgb(0x4F, 0xC3, 0xF7) : ListSelected;
     public static Color CurrentListSelectedBg => IsDark ? Color.FromArgb(0x2D, 0x2D, 0x4F) : ListSelectedBg;
+
+    public static readonly Font TitleFont = new(UiFont, 20F, FontStyle.Bold);
+    public static readonly Font BodyFont = new(UiFont, 9.5F);
+    public static readonly Font SmallFont = new(UiFont, 8.5F);
+    public static readonly Font SectionFont = new(UiFont, 9.5F, FontStyle.Bold);
+    public static readonly Font MonoBodyFont = new(MonoFont, 9.5F);
+    public static void SetDark(bool dark) => IsDark = dark;
 
     public static void Toggle()
     {
@@ -58,7 +65,7 @@ internal static class Theme
         button.FlatAppearance.MouseDownBackColor = CurrentAccentDim;
         button.BackColor = CurrentSurface;
         button.ForeColor = CurrentTextPrimary;
-        button.Font = new Font(UiFont, 8.5F);
+        button.Font = SmallFont;
         button.Cursor = Cursors.Hand;
     }
 
@@ -84,7 +91,7 @@ internal static class Theme
     public static void StyleLabel(Label label, bool isHeader = false)
     {
         label.ForeColor = isHeader ? CurrentTextSecondary : CurrentTextMuted;
-        label.Font = new Font(UiFont, isHeader ? 9F : 8.5F, isHeader ? FontStyle.Bold : FontStyle.Regular);
+        label.Font = isHeader ? SectionFont : SmallFont;
     }
 
     public static void StyleTextBox(TextBoxBase textBox)
@@ -92,7 +99,7 @@ internal static class Theme
         textBox.BackColor = CurrentInputBg;
         textBox.ForeColor = CurrentTextPrimary;
         textBox.BorderStyle = BorderStyle.FixedSingle;
-        textBox.Font = new Font(UiFont, 9F);
+        textBox.Font = BodyFont;
     }
 
     public static void StyleListBox(ListBox listBox)
@@ -100,9 +107,9 @@ internal static class Theme
         listBox.BackColor = CurrentListBg;
         listBox.ForeColor = CurrentTextPrimary;
         listBox.BorderStyle = BorderStyle.FixedSingle;
-        listBox.Font = new Font(UiFont, 9F);
+        listBox.Font = BodyFont;
         listBox.DrawMode = DrawMode.OwnerDrawFixed;
-        listBox.ItemHeight = 28;
+        listBox.ItemHeight = listBox.Tag as string == "Profiles" ? 64 : listBox.Tag as string == "Steps" ? 48 : 30;
         listBox.DrawItem -= OnListBoxDrawItem;
         listBox.DrawItem += OnListBoxDrawItem;
     }
@@ -123,10 +130,24 @@ internal static class Theme
             e.Graphics.DrawLine(accentPen, e.Bounds.Left, e.Bounds.Top, e.Bounds.Left, e.Bounds.Bottom);
         }
 
-        using var textBrush = new SolidBrush(isSelected ? CurrentListSelected : CurrentTextPrimary);
-        var textRect = new Rectangle(e.Bounds.X + 8, e.Bounds.Y, e.Bounds.Width - 12, e.Bounds.Height);
-        using var format = new StringFormat { LineAlignment = StringAlignment.Center };
-        e.Graphics.DrawString(text, lb.Font, textBrush, textRect, format);
+        var color = isSelected ? CurrentAccent : CurrentTextPrimary;
+        var textRect = new Rectangle(e.Bounds.X + 12, e.Bounds.Y + 3, e.Bounds.Width - 24, e.Bounds.Height - 6);
+        var flags = TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix;
+        if (lb.Items[e.Index] is MacroProfile profile)
+        {
+            TextRenderer.DrawText(e.Graphics, profile.Name, SectionFont, new Rectangle(textRect.X, textRect.Y + 5, textRect.Width, 23), color, flags);
+            TextRenderer.DrawText(e.Graphics, $"{(profile.Enabled ? "●" : "○")}  {profile.ShortcutText}   ·   {profile.Steps.Count} 步", SmallFont,
+                new Rectangle(textRect.X, textRect.Y + 30, textRect.Width, 22), CurrentTextSecondary, flags);
+        }
+        else if (lb.Items[e.Index] is MacroStep step)
+        {
+            var timing = step.RecordedDelayMs is int ms ? $"  ·  间隔 {ms / 1000.0:0.###} 秒" : "";
+            TextRenderer.DrawText(e.Graphics, $"{e.Index + 1:00}   {step.Display}", BodyFont,
+                new Rectangle(textRect.X, textRect.Y + 3, textRect.Width, 24), color, flags);
+            TextRenderer.DrawText(e.Graphics, $"{(step.RecordedDelayMs.HasValue ? "录制时序" : "手动动作")}{timing}", SmallFont,
+                new Rectangle(textRect.X + 30, textRect.Y + 25, textRect.Width - 30, 18), CurrentTextSecondary, flags);
+        }
+        else TextRenderer.DrawText(e.Graphics, text, BodyFont, textRect, color, flags | TextFormatFlags.VerticalCenter);
     }
 
     public static void StyleComboBox(ComboBox comboBox)
@@ -134,7 +155,22 @@ internal static class Theme
         comboBox.BackColor = CurrentInputBg;
         comboBox.ForeColor = CurrentTextPrimary;
         comboBox.FlatStyle = FlatStyle.Flat;
-        comboBox.Font = new Font(UiFont, 9F);
+        comboBox.Font = BodyFont;
+        comboBox.DrawMode = DrawMode.OwnerDrawFixed;
+        comboBox.ItemHeight = Math.Max(22, TextRenderer.MeasureText("快捷键", BodyFont).Height + 2);
+        comboBox.DrawItem -= DrawComboItem;
+        comboBox.DrawItem += DrawComboItem;
+    }
+
+    private static void DrawComboItem(object? sender, DrawItemEventArgs e)
+    {
+        var combo = (ComboBox)sender!;
+        var selected = (e.State & DrawItemState.Selected) != 0;
+        using var fill = new SolidBrush(selected ? CurrentListSelectedBg : CurrentInputBg);
+        e.Graphics.FillRectangle(fill, e.Bounds);
+        var text = e.Index >= 0 ? combo.GetItemText(combo.Items[e.Index]) : combo.Text;
+        TextRenderer.DrawText(e.Graphics, text, combo.Font, Rectangle.Inflate(e.Bounds, -4, 0),
+            CurrentTextPrimary, TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
     }
 
     public static void StyleNumericUpDown(NumericUpDown numeric)
@@ -142,7 +178,7 @@ internal static class Theme
         numeric.BackColor = CurrentInputBg;
         numeric.ForeColor = CurrentTextPrimary;
         numeric.BorderStyle = BorderStyle.FixedSingle;
-        numeric.Font = new Font(UiFont, 9F);
+        numeric.Font = BodyFont;
     }
 
     public static void StylePanel(Control panel)
@@ -153,20 +189,20 @@ internal static class Theme
     public static void StyleSectionHeader(Label label)
     {
         label.ForeColor = CurrentAccent;
-        label.Font = new Font(UiFont, 9.5F, FontStyle.Bold);
+        label.Font = SectionFont;
     }
 
     public static void StyleStatusBar(Label label)
     {
         label.BackColor = CurrentSurface;
         label.ForeColor = CurrentTextSecondary;
-        label.Font = new Font(MonoFont, 8.5F);
+        label.Font = BodyFont;
         label.Padding = new Padding(8, 0, 0, 0);
     }
 
     public static void StyleMonoLabel(Label label)
     {
         label.ForeColor = CurrentAccent;
-        label.Font = new Font(MonoFont, 10F, FontStyle.Bold);
+        label.Font = MonoBodyFont;
     }
 }

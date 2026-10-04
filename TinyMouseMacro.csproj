@@ -11,4 +11,8 @@
     <ApplicationIcon>app.ico</ApplicationIcon>
   </PropertyGroup>
 
+  <ItemGroup>
+    <Compile Remove="launcher/**/*.cs" />
+  </ItemGroup>
+
 </Project>

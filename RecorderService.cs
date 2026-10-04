@@ -1,160 +1,140 @@
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 
 namespace TinyMouseMacro;
 
 public sealed class RecorderService : IDisposable
 {
-    private const int MoveThrottleMs = 150;
-
-    private nint _mouseHookHandle;
-    private nint _keyboardHookHandle;
+    private readonly InputThread _thread = new("TinyMouseMacro recorder");
+    private readonly List<MacroStep> _steps = [];
+    private readonly Stopwatch _clock = new();
+    private readonly KeyEventState _keys = new();
+    private readonly RecordingTimeline _timeline = new();
     private NativeMethods.LowLevelMouseProc? _mouseProc;
     private NativeMethods.LowLevelKeyboardProc? _keyboardProc;
-    private readonly List<MacroStep> _steps = [];
-    private readonly object _lock = new();
-    private DateTime _lastMoveTime = DateTime.MinValue;
-    private volatile bool _isRecording;
-
-    public bool IsRecording => _isRecording;
-
-    public IReadOnlyList<MacroStep> Steps
-    {
-        get { lock (_lock) return _steps.ToList(); }
-    }
-
+    private nint _mouseHook, _keyboardHook, _excludedWindow;
+    private volatile bool _recording;
+    private bool _disposed;
+    private long _lastMove;
+    public bool LimitReached { get; private set; }
+    public bool IsRecording => _recording;
     public event Action<MacroStep>? StepRecorded;
-
-    public void Start()
+    public void Start(bool keyboard = false, nint excludedWindow = 0)
     {
-        if (_isRecording) return;
-
-        lock (_lock) _steps.Clear();
-        _isRecording = true;
-        _lastMoveTime = DateTime.MinValue;
-
-        _mouseProc = MouseHookCallback;
-        _keyboardProc = KeyboardHookCallback;
-        using var curProcess = System.Diagnostics.Process.GetCurrentProcess();
-        using var curModule = curProcess.MainModule;
-        var moduleHandle = NativeMethods.GetModuleHandleW(curModule?.ModuleName);
-
-        _mouseHookHandle = NativeMethods.SetWindowsHookExW(NativeMethods.WhMouseLl, _mouseProc, moduleHandle, 0);
-        if (_mouseHookHandle == 0)
+        _thread.Invoke(() =>
         {
-            ThrowStartFailed(UiText.MouseHook, Marshal.GetLastWin32Error());
-        }
-
-        _keyboardHookHandle = NativeMethods.SetWindowsHookExW(NativeMethods.WhKeyboardLl, _keyboardProc, moduleHandle, 0);
-        if (_keyboardHookHandle == 0)
-        {
-            ThrowStartFailed(UiText.KeyboardHook, Marshal.GetLastWin32Error());
-        }
+            if (_recording) return;
+            _steps.Clear(); _keys.Clear(); _keys.SynchronizeModifiers(); _timeline.Reset(); _lastMove = -150; LimitReached = false;
+            _excludedWindow = excludedWindow;
+            _mouseProc = MouseCallback;
+            _mouseHook = NativeMethods.SetWindowsHookExW(NativeMethods.WhMouseLl, _mouseProc, NativeMethods.GetModuleHandleW(null), 0);
+            if (_mouseHook == 0) throw new InvalidOperationException("鼠标录制启动失败：" + new Win32Exception(Marshal.GetLastWin32Error()).Message);
+            if (keyboard)
+            {
+                _keyboardProc = KeyboardCallback;
+                _keyboardHook = NativeMethods.SetWindowsHookExW(NativeMethods.WhKeyboardLl, _keyboardProc, NativeMethods.GetModuleHandleW(null), 0);
+                if (_keyboardHook == 0)
+                {
+                    var error = Marshal.GetLastWin32Error(); StopCore();
+                    throw new InvalidOperationException("键盘录制启动失败：" + new Win32Exception(error).Message);
+                }
+            }
+            _clock.Restart(); _recording = true;
+        });
     }
-
     public List<MacroStep> Stop()
     {
-        _isRecording = false;
-
-        if (_mouseHookHandle != 0)
-        {
-            NativeMethods.UnhookWindowsHookEx(_mouseHookHandle);
-            _mouseHookHandle = 0;
-        }
-
-        if (_keyboardHookHandle != 0)
-        {
-            NativeMethods.UnhookWindowsHookEx(_keyboardHookHandle);
-            _keyboardHookHandle = 0;
-        }
-
-        _mouseProc = null;
-        _keyboardProc = null;
-
-        lock (_lock) return _steps.ToList();
+        List<MacroStep> result = [];
+        _thread.Invoke(() => { StopCore(); result = _steps.ToList(); });
+        return result;
     }
-
-    private nint MouseHookCallback(int nCode, nint wParam, nint lParam)
+    private void StopCore()
     {
-        if (nCode >= 0 && _isRecording)
+        _recording = false; _clock.Stop();
+        if (_mouseHook != 0) NativeMethods.UnhookWindowsHookEx(_mouseHook);
+        if (_keyboardHook != 0) NativeMethods.UnhookWindowsHookEx(_keyboardHook);
+        _mouseHook = _keyboardHook = 0; _mouseProc = null; _keyboardProc = null;
+    }
+    private bool IsOwnWindow(nint window)
+    {
+        if (_excludedWindow == 0) return false;
+        NativeMethods.GetWindowThreadProcessId(window, out var processId);
+        return processId == Environment.ProcessId;
+    }
+    private nint MouseCallback(int code, nint message, nint data)
+    {
+        try
         {
-            var ms = Marshal.PtrToStructure<NativeMethods.Msllhookstruct>(lParam);
-            var pt = ms.Pt;
-
-            if (wParam == NativeMethods.WmLbuttonDown)
+            if (code >= 0 && _recording)
             {
-                AddStep(new MacroStep { Type = MacroStepType.LeftClick, X = pt.X, Y = pt.Y });
-            }
-            else if (wParam == NativeMethods.WmRButtonDown)
-            {
-                AddStep(new MacroStep { Type = MacroStepType.RightClick, X = pt.X, Y = pt.Y });
-            }
-            else if (wParam == NativeMethods.WmMButtonDown)
-            {
-                AddStep(new MacroStep { Type = MacroStepType.MiddleClick, X = pt.X, Y = pt.Y });
-            }
-            else if (wParam == NativeMethods.WmMouseWheel)
-            {
-                var delta = (short)((ms.MouseData >> 16) & 0xFFFF);
-                AddStep(new MacroStep { Type = MacroStepType.MouseWheel, WheelDelta = delta });
-            }
-            else if (wParam == NativeMethods.WmMouseMove)
-            {
-                var now = DateTime.UtcNow;
-                if ((now - _lastMoveTime).TotalMilliseconds >= MoveThrottleMs)
+                var ms = Marshal.PtrToStructure<NativeMethods.Msllhookstruct>(data);
+                if ((nuint)ms.DwExtraInfo != NativeMethods.MacroInputTag && !IsOwnWindow(NativeMethods.WindowFromPoint(ms.Pt)))
                 {
-                    _lastMoveTime = now;
-                    AddStep(new MacroStep { Type = MacroStepType.Move, X = pt.X, Y = pt.Y });
+                    var now = _clock.ElapsedMilliseconds;
+                    MacroStep? step = message switch
+                    {
+                        NativeMethods.WmLbuttonDown => new() { Type = MacroStepType.LeftClick, X = ms.Pt.X, Y = ms.Pt.Y },
+                        NativeMethods.WmRButtonDown => new() { Type = MacroStepType.RightClick, X = ms.Pt.X, Y = ms.Pt.Y },
+                        NativeMethods.WmMButtonDown => new() { Type = MacroStepType.MiddleClick, X = ms.Pt.X, Y = ms.Pt.Y },
+                        NativeMethods.WmMouseWheel => new() { Type = MacroStepType.MouseWheel, WheelDelta = (short)(ms.MouseData >> 16) },
+                        NativeMethods.WmMouseMove when now - _lastMove >= 150 => new() { Type = MacroStepType.Move, X = ms.Pt.X, Y = ms.Pt.Y },
+                        _ => null
+                    };
+                    if (step is not null) { if (step.Type == MacroStepType.Move) _lastMove = now; Add(step, now); }
                 }
             }
         }
-
-        return NativeMethods.CallNextHookEx(_mouseHookHandle, nCode, wParam, lParam);
+        catch { }
+        return NativeMethods.CallNextHookEx(_mouseHook, code, message, data);
     }
-
-    private nint KeyboardHookCallback(int nCode, nint wParam, nint lParam)
+    private nint KeyboardCallback(int code, nint message, nint data)
     {
-        if (nCode >= 0 && _isRecording && wParam is NativeMethods.WmKeyDown or NativeMethods.WmSysKeyDown)
-        {
-            var kb = Marshal.PtrToStructure<NativeMethods.Kbdllhookstruct>(lParam);
-            var vkCode = (int)kb.VkCode;
-
-            if (!IsModifier(vkCode))
-            {
-                AddStep(new MacroStep { Type = MacroStepType.KeyPress, KeyCode = vkCode });
-            }
-        }
-
-        return NativeMethods.CallNextHookEx(_keyboardHookHandle, nCode, wParam, lParam);
-    }
-
-    private void AddStep(MacroStep step)
-    {
-        lock (_lock) _steps.Add(step);
-
         try
         {
-            StepRecorded?.Invoke(step);
+            if (code >= 0 && _recording && message is NativeMethods.WmKeyDown or NativeMethods.WmSysKeyDown or NativeMethods.WmKeyUp or NativeMethods.WmSysKeyUp)
+            {
+                var kb = Marshal.PtrToStructure<NativeMethods.Kbdllhookstruct>(data);
+                if ((nuint)kb.DwExtraInfo != NativeMethods.MacroInputTag)
+                {
+                    var key = (int)kb.VkCode; var down = message is NativeMethods.WmKeyDown or NativeMethods.WmSysKeyDown;
+                    _keys.Update(key, down);
+                    if (down && !HotkeyParser.IsModifierKey((Keys)key) && !IsOwnWindow(NativeMethods.GetForegroundWindow()) &&
+                        !(key is (int)Keys.F10 or (int)Keys.P && (_keys.Modifiers & 3) == 3))
+                    {
+                        Add(new() { Type = _keys.Modifiers == 0 ? MacroStepType.KeyPress : MacroStepType.KeyCombo,
+                            KeyCode = key, KeyModifiers = _keys.Modifiers }, _clock.ElapsedMilliseconds);
+                    }
+                }
+            }
         }
-        catch
-        {
-        }
+        catch { }
+        return NativeMethods.CallNextHookEx(_keyboardHook, code, message, data);
     }
-
-    private void ThrowStartFailed(string hookName, int errorCode)
+    private void Add(MacroStep step, long now)
     {
-        Stop();
-        var message = new Win32Exception(errorCode).Message;
-        throw new InvalidOperationException(UiText.HookInstallFailed(hookName, message));
+        // Bounded to keep an accidentally forgotten recording from consuming unbounded memory.
+        if (_steps.Count >= 100000) { LimitReached = true; return; }
+        _timeline.Stamp(step, now); _steps.Add(step); StepRecorded?.Invoke(step);
     }
+    public void Dispose() { if (_disposed) return; _disposed = true; _thread.Invoke(StopCore); _thread.Dispose(); }
+}
 
-    private static bool IsModifier(int vk)
+internal sealed class RecordingTimeline
+{
+    private long _previous;
+    public void Reset() => _previous = 0;
+    public void Stamp(MacroStep step, long elapsedMs)
     {
-        return vk is >= 0xA0 and <= 0xA5 or 0x10 or 0x11 or 0x12 or 0x5B or 0x5C;
+        step.RecordedDelayMs = (int)Math.Clamp(elapsedMs - _previous, 0, 86400000);
+        _previous = elapsedMs;
     }
+}
 
-    public void Dispose()
-    {
-        if (_isRecording) Stop();
-    }
+internal static partial class NativeMethods
+{
+    [DllImport("user32.dll")] public static extern nint WindowFromPoint(Point point);
+    [DllImport("user32.dll")] public static extern nint GetAncestor(nint window, uint flags);
+    [DllImport("user32.dll")] public static extern nint GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(nint window, out int processId);
 }

@@ -20,6 +20,16 @@ public sealed class MacroProfile
     public string TargetWindowTitle { get; set; } = string.Empty;
     public double SpeedMultiplier { get; set; } = 1.0;
     public int ScheduleIntervalMinutes { get; set; }
+    // Missing in older files: preserve their original click/move behavior.
+    public bool ReleaseRemoteInput { get; set; }
+
+    [JsonIgnore]
+    public string ShortcutText => TriggerType switch
+    {
+        MacroTriggerType.KeyboardHook => TriggerKey > 0 ? HotkeyParser.Normalize(TriggerModifiers, (uint)TriggerKey) : "未设置",
+        MacroTriggerType.MouseButton => TriggerMouseButton switch { 4 => "X1", 5 => "X2", 3 => "中键", _ => "未设置" },
+        _ => string.IsNullOrWhiteSpace(Hotkey) ? "未设置" : Hotkey
+    };
 
     [JsonIgnore]
     public DateTime? ScheduleNextRun { get; set; }
@@ -45,6 +55,8 @@ public sealed class MacroProfile
 
 public sealed class MacroStep
 {
+    // Null preserves legacy pacing. A recorded step stores onset-to-onset timing.
+    public int? RecordedDelayMs { get; set; }
     public MacroStepType Type { get; set; }
     public int X { get; set; }
     public int Y { get; set; }

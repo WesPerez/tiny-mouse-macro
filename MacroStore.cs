@@ -63,6 +63,7 @@ public sealed class MacroStore
 
         if (File.Exists(FilePath))
         {
+            if (!File.Exists(FilePath + ".backup")) File.Copy(FilePath, FilePath + ".backup");
             File.Replace(tempPath, FilePath, null, ignoreMetadataErrors: true);
         }
         else
@@ -93,12 +94,12 @@ public sealed class MacroStore
         profile.TargetWindowTitle ??= string.Empty;
         profile.TriggerType = Enum.IsDefined(profile.TriggerType) ? profile.TriggerType : MacroTriggerType.KeyboardHotkey;
         profile.TriggerKey = Math.Max(0, profile.TriggerKey);
+        profile.TriggerModifiers &= 15;
         profile.TriggerMouseButton = profile.TriggerMouseButton is 3 or 4 or 5 ? profile.TriggerMouseButton : 0;
         profile.RepeatCount = Math.Clamp(profile.RepeatCount, 0, 9999);
         profile.RepeatIntervalMs = Math.Clamp(profile.RepeatIntervalMs, 0, 600000);
         profile.SpeedMultiplier = Math.Clamp(profile.SpeedMultiplier, 0.1, 10.0);
         profile.ScheduleIntervalMinutes = Math.Clamp(profile.ScheduleIntervalMinutes, 0, 1440);
-        profile.ScheduleNextRun = null;
         profile.Steps ??= [];
 
         for (var i = profile.Steps.Count - 1; i >= 0; i--)
@@ -118,6 +119,7 @@ public sealed class MacroStore
 
     public static MacroStep NormalizeStep(MacroStep step)
     {
+        if (step.RecordedDelayMs.HasValue) step.RecordedDelayMs = Math.Clamp(step.RecordedDelayMs.Value, 0, 86400000);
         step.Type = Enum.IsDefined(step.Type) ? step.Type : MacroStepType.Move;
         step.DelayMs = Math.Clamp(step.DelayMs, 0, 600000);
         step.DelayMsMax = Math.Clamp(step.DelayMsMax, 0, 600000);
@@ -144,6 +146,7 @@ public sealed class MacroStore
         {
             Name = $"{UiText.Macro} 1",
             Hotkey = "Alt+Z",
+            ReleaseRemoteInput = true,
             Steps = []
         };
     }

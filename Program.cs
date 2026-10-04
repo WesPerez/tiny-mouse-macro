@@ -8,9 +8,15 @@ static class Program
     private const int WmShowWindow = NativeMethods.WmUser + 1;
 
     [STAThread]
-    static int Main()
+    static int Main(string[] args)
     {
         NativeMethods.SetProcessDpiAwarenessContext(new nint(-4));
+
+        if (args.Length > 0 && args[0] == "--self-test")
+        {
+            ApplicationConfiguration.Initialize();
+            return SelfTest.Run(args.Length > 1 ? args[1] : Path.Combine(AppContext.BaseDirectory, "verification"));
+        }
 
         using var mutex = new Mutex(true, MutexName, out var createdNew);
         if (!createdNew)
@@ -174,6 +180,15 @@ internal static partial class NativeMethods
     public struct InputUnion
     {
         [FieldOffset(0)] public Keybdinput Ki;
+        [FieldOffset(0)] public Mouseinput Mi;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct Mouseinput
+    {
+        public int Dx, Dy;
+        public uint MouseData, Flags, Time;
+        public nuint ExtraInfo;
     }
 
     [StructLayout(LayoutKind.Sequential)]
