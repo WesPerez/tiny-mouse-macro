@@ -312,6 +312,8 @@ public sealed partial class MainForm : Form
             1 => MacroTriggerType.MouseButton,
             _ => MacroTriggerType.KeyboardHotkey
         };
+        if (CurrentProfile.TriggerType == MacroTriggerType.MouseButton)
+            CurrentProfile.TriggerMouseButton = _mouseButtonBox.SelectedIndex switch { 0 => 4, 1 => 5, _ => 3 };
 
         _hotkeyBox.Visible = CurrentProfile.TriggerType == MacroTriggerType.KeyboardHotkey;
         _hookKeyBox.Visible = CurrentProfile.TriggerType == MacroTriggerType.KeyboardHook;

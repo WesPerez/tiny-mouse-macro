@@ -16,6 +16,8 @@ internal static class SelfTest
             void Check(string name, bool pass)
             { if (!pass) throw new InvalidOperationException(name); results.Add("PASS " + name); }
             Check("hotkey parser", HotkeyParser.TryParse("Ctrl+Shift+F13", out var mods, out var key, out _) && mods == 6 && key == (uint)Keys.F13);
+            const string startupPath = @"C:\Program Files\TinyMouseMacro\TinyMouseMacro.exe";
+            Check("startup command contains the quoted executable path", AutoStart.BuildCommand(startupPath) == "\"C:\\Program Files\\TinyMouseMacro\\TinyMouseMacro.exe\"");
             Check("negative coordinates and old enum values", (int)MacroStepType.LeftClick == 1 && (int)MacroStepType.ChainMacro == 19);
             var old = JsonSerializer.Deserialize<MacroProfile>("{\"Name\":\"上\",\"Hotkey\":\"Shift+Z\",\"Steps\":[{\"Type\":1,\"X\":2272,\"Y\":-457}]}")!;
             MacroStore.NormalizeProfile(old);
@@ -247,6 +249,21 @@ internal static class SelfTest
                 if (type == (int)MacroStepType.Delay) Check("seconds editor preserves millisecond precision", dialog.DelayMs == 1250 && dialog.DelayMsMax == 2750 && dialog.RecordedDelayMs == 640);
                 if (type == (int)MacroStepType.KeyPress)
                 {
+                    var capture = FindField<KeyCaptureBox>(dialog, "_keyCapture");
+                    capture.CaptureForTest(Keys.Menu);
+                    Check("direct key capture selects left Alt", dialog.KeyCode == (int)Keys.LMenu);
+                    capture.CaptureForTest(Keys.Menu, 1L << 24);
+                    Check("direct key capture distinguishes right Alt", dialog.KeyCode == (int)Keys.RMenu);
+                    // A new capture field has no held keys from the previous fixture.
+                    using (var comboDialog = new StepEditDialog(new() { Type = MacroStepType.KeyPress }))
+                    {
+                        var comboCapture = FindField<KeyCaptureBox>(comboDialog, "_keyCapture");
+                        comboCapture.CaptureForTest(Keys.ControlKey);
+                        comboCapture.CaptureForTest(Keys.ShiftKey);
+                        comboCapture.CaptureForTest(Keys.X);
+                        Check("direct chord capture changes action type and retains Ctrl Shift X",
+                            comboDialog.StepType == MacroStepType.KeyCombo && comboDialog.KeyComboCode == (int)Keys.X && comboDialog.KeyModifiers == 6);
+                    }
                     var selector = FindField<ComboBox>(dialog, "_keyPressBox");
                     selector.SelectedItem = Keys.Menu;
                     Check("single Alt is selectable and clearly named", dialog.KeyCode == (int)Keys.Menu && selector.GetItemText(selector.SelectedItem) == "Alt");
@@ -309,7 +326,10 @@ public sealed partial class MainForm
         var savedType = legacy.TriggerType; var savedShortcut = legacy.Hotkey;
         legacy.TriggerType = MacroTriggerType.KeyboardHook; legacy.TriggerKey = (int)Keys.X; legacy.TriggerModifiers = 4;
         BindSelectedProfile();
-        _triggerTypeBox.SelectedIndex = 1; _triggerTypeBox.SelectedIndex = 0;
+        legacy.TriggerMouseButton = 0;
+        _triggerTypeBox.SelectedIndex = 1;
+        check("switching to mouse trigger stores the displayed default X1", legacy.TriggerMouseButton == 4);
+        _triggerTypeBox.SelectedIndex = 0;
         check("legacy keyboard chord survives mouse and keyboard selection", legacy.Hotkey == "SHIFT+X");
         legacy.TriggerType = savedType; legacy.Hotkey = savedShortcut; BindSelectedProfile();
         _startingRecording = true;

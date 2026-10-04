@@ -6,6 +6,7 @@ internal static class AutoStart
 {
     private const string KeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string ValueName = "TinyMouseMacro";
+    internal static string BuildCommand(string processPath) => "\"" + processPath + "\"";
 
     public static bool IsEnabled()
     {
@@ -31,7 +32,7 @@ internal static class AutoStart
 
                 using var key = Registry.CurrentUser.OpenSubKey(KeyPath, writable: true)
                     ?? Registry.CurrentUser.CreateSubKey(KeyPath);
-                key.SetValue(ValueName, """" + processPath + """");
+                key.SetValue(ValueName, BuildCommand(processPath));
                 return true;
             }
             else
