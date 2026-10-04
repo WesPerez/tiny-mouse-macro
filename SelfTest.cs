@@ -435,6 +435,15 @@ public sealed partial class MainForm
     }
     internal bool ValidatePreviewLayout(out string error)
     {
+        var fields = new Control[] { _nameBox.Parent!, _triggerTypeBox, _hotkeyBox.Parent!, _mouseButtonBox };
+        static int TopInForm(Control field)
+        { var top = 0; for (Control? current = field; current is not null && current is not Form; current = current.Parent) top += current.Top; return top; }
+        var expected = TopInForm(_triggerTypeBox);
+        foreach (var field in fields)
+            if (field.Height != _triggerTypeBox.Height || TopInForm(field) != expected)
+            { error = $"Identity field is not aligned: {field.GetType().Name} {field.Bounds}"; return false; }
+        if (_statusLabel.BackColor != Color.Transparent || _saveState.BackColor != Color.Transparent)
+        { error = "Footer labels must share their container background"; return false; }
         foreach (var c in new Control[] { _cancelButton, _runButton, _activityTitle, _activityBadge, _themeButton, _profileList, _stepList, _recordButton, _screenMap, _hotkeyBox, _logList })
         {
             if (c.Width < 20 || c.Height < 20) { error = $"{c.Name}/{c.AccessibleName} too small {c.Bounds}"; return false; }

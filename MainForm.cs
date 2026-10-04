@@ -318,6 +318,7 @@ public sealed partial class MainForm : Form
         _hotkeyBox.Visible = CurrentProfile.TriggerType == MacroTriggerType.KeyboardHotkey;
         _hookKeyBox.Visible = CurrentProfile.TriggerType == MacroTriggerType.KeyboardHook;
         _mouseButtonBox.Visible = CurrentProfile.TriggerType == MacroTriggerType.MouseButton;
+        _hotkeyBox.Parent!.Visible = CurrentProfile.TriggerType != MacroTriggerType.MouseButton;
         MarkDirty();
     }
 
@@ -356,6 +357,7 @@ public sealed partial class MainForm : Form
             _hotkeyBox.Visible = profile?.TriggerType == MacroTriggerType.KeyboardHotkey;
             _hookKeyBox.Visible = profile?.TriggerType == MacroTriggerType.KeyboardHook;
             _mouseButtonBox.Visible = profile?.TriggerType == MacroTriggerType.MouseButton;
+            _hotkeyBox.Parent!.Visible = profile is not null && profile.TriggerType != MacroTriggerType.MouseButton;
 
             _stepsSource.DataSource = profile?.Steps ?? [];
             _stepsSource.ResetBindings(false);

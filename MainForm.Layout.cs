@@ -49,7 +49,7 @@ public sealed partial class MainForm
         body.Padding = new(0, 12, 0, 0); root.Controls.Add(body, 0, 2);
         body.Controls.Add(BuildSidebar(), 0, 0);
         var workspace = Grid(1, 2); workspace.Padding = new(18, 0, 0, 0);
-        workspace.RowStyles.Add(new(SizeType.Absolute, 70));
+        workspace.RowStyles.Add(new(SizeType.Absolute, 86));
         workspace.RowStyles.Add(new(SizeType.Percent, 100));
         workspace.Controls.Add(BuildIdentity(), 0, 0);
         _composePanel = BuildComposer(); _optionsPanel = BuildOptions(); _diagnosticsPanel = BuildDiagnostics();
@@ -65,6 +65,7 @@ public sealed partial class MainForm
         _statusLabel.TextAlign = ContentAlignment.MiddleLeft; _statusLabel.Tag = ThemeRoleStatus;
         Theme.StyleStatusBar(_statusLabel); footer.Controls.Add(_statusLabel, 0, 0);
         _saveState.Dock = DockStyle.Fill; _saveState.TextAlign = ContentAlignment.MiddleRight;
+        _saveState.BackColor = Color.Transparent; _saveState.Tag = "Body";
         _saveState.Font = Theme.BodyFont; _saveState.ForeColor = Theme.CurrentTextSecondary;
         footer.Controls.Add(_saveState, 1, 0); root.Controls.Add(footer, 0, 3);
         _saveTimer.Tick += (_, _) => { _saveTimer.Stop(); SaveAll(); };
@@ -78,13 +79,15 @@ public sealed partial class MainForm
     private Control BuildSidebar()
     {
         var panel = Grid(1, 5, 12, rounded: true);
-        panel.RowStyles.Add(new(SizeType.Absolute, 36)); panel.RowStyles.Add(new(SizeType.Absolute, 42));
+        panel.RowStyles.Add(new(SizeType.Absolute, 28)); panel.RowStyles.Add(new(SizeType.Absolute, 42));
         panel.RowStyles.Add(new(SizeType.Percent, 100)); panel.RowStyles.Add(new(SizeType.Absolute, 46));
         panel.RowStyles.Add(new(SizeType.Absolute, 74));
         panel.Controls.Add(Heading("我的方案"), 0, 0);
-        _searchBox.Dock = DockStyle.Fill; _searchBox.PlaceholderText = "搜索名称或快捷键";
+        _searchBox.PlaceholderText = "搜索名称或快捷键";
+        var searchField = new InputSurface { Dock = DockStyle.Top, Height = 32, Margin = new(3) };
+        searchField.Controls.Add(_searchBox);
         _searchBox.AccessibleName = "搜索方案"; Theme.StyleTextBox(_searchBox);
-        _searchBox.TextChanged += (_, _) => FilterProfiles(); panel.Controls.Add(_searchBox, 0, 1);
+        _searchBox.TextChanged += (_, _) => FilterProfiles(); panel.Controls.Add(searchField, 0, 1);
         _profileList.Dock = DockStyle.Fill; _profileList.IntegralHeight = false; _profileList.AccessibleName = "方案列表";
         _profileList.SelectedIndexChanged += (_, _) => BindSelectedProfile();
         Theme.StyleListBox(_profileList); _profileList.Tag = "Profiles"; _profileList.ItemHeight = 64;
@@ -111,32 +114,37 @@ public sealed partial class MainForm
 
     private Control BuildIdentity()
     {
-        var panel = Grid(4, 2);
+        var panel = Grid(4, 2, 12);
+        panel.Padding = new(12, 12, 12, 4);
         panel.ColumnStyles.Add(new(SizeType.Percent, 40)); panel.ColumnStyles.Add(new(SizeType.Absolute, 170));
         panel.ColumnStyles.Add(new(SizeType.Percent, 60)); panel.ColumnStyles.Add(new(SizeType.Absolute, 88));
         panel.RowStyles.Add(new(SizeType.Absolute, 28)); panel.RowStyles.Add(new(SizeType.Percent, 100));
         panel.Controls.Add(Heading("方案名称"), 0, 0); panel.Controls.Add(Heading("触发方式"), 1, 0); panel.Controls.Add(Heading("快捷键"), 2, 0);
-        Theme.StyleTextBox(_nameBox); _nameBox.Dock = DockStyle.Fill; _nameBox.AccessibleName = "方案名称";
+        Theme.StyleTextBox(_nameBox); _nameBox.AccessibleName = "方案名称";
+        var nameField = new InputSurface { Dock = DockStyle.Top, Height = 32, Margin = new(3) };
+        nameField.Controls.Add(_nameBox); Theme.StyleTextBox(_nameBox);
         _nameBox.TextChanged += (_, _) =>
         {
             if (_isBinding || CurrentProfile is null) return;
             CurrentProfile.Name = string.IsNullOrWhiteSpace(_nameBox.Text) ? UiText.Untitled : _nameBox.Text.Trim();
             _profileList.Invalidate(); MarkDirty();
         };
-        panel.Controls.Add(_nameBox, 0, 1);
+        panel.Controls.Add(nameField, 0, 1);
         _triggerTypeBox.DropDownStyle = ComboBoxStyle.DropDownList;
         _triggerTypeBox.Items.AddRange(["键盘快捷键", "鼠标按键"]);
-        _triggerTypeBox.Dock = DockStyle.Fill; Theme.StyleComboBox(_triggerTypeBox);
+        _triggerTypeBox.Dock = DockStyle.Top; Theme.StyleComboBox(_triggerTypeBox);
         _triggerTypeBox.SelectedIndexChanged += TriggerTypeBox_SelectedIndexChanged;
         panel.Controls.Add(_triggerTypeBox, 1, 1);
         var inputs = new Panel { Dock = DockStyle.Fill };
+        var shortcutField = new InputSurface { Dock = DockStyle.Top, Height = _triggerTypeBox.Height, Margin = Padding.Empty };
+        inputs.Controls.Add(shortcutField);
         foreach (var box in new[] { _hotkeyBox, _hookKeyBox })
         {
-            box.Dock = DockStyle.Top; box.ReadOnly = true; box.PlaceholderText = "点击后按键；Backspace 清除";
+            box.ReadOnly = true; box.PlaceholderText = "点击后按键；Backspace 清除";
             box.AccessibleName = "方案快捷键"; Theme.StyleTextBox(box); box.PreviewKeyDown += (_, e) => e.IsInputKey = true;
             box.Enter += (_, _) => { if (_hotkeys is not null) _hotkeys.Suspended = true; };
             box.Leave += (_, _) => { if (_hotkeys is not null) { _hotkeys.Suspended = IsCapturing; RebuildHotkeys(); } };
-            inputs.Controls.Add(box);
+            shortcutField.Controls.Add(box); Theme.StyleTextBox(box);
         }
         _hotkeyBox.KeyDown += HotkeyBox_KeyDown; _hookKeyBox.KeyDown += HookKeyBox_KeyDown;
         _mouseButtonBox.Dock = DockStyle.Top; _mouseButtonBox.DropDownStyle = ComboBoxStyle.DropDownList;
@@ -144,7 +152,14 @@ public sealed partial class MainForm
         _mouseButtonBox.SelectedIndexChanged += (_, _) =>
         { if (_isBinding || CurrentProfile is null) return; CurrentProfile.TriggerMouseButton = _mouseButtonBox.SelectedIndex switch { 0 => 4, 1 => 5, _ => 3 }; MarkDirty(); };
         inputs.Controls.Add(_mouseButtonBox); panel.Controls.Add(inputs, 2, 1);
-        _enabledCheckBox.Text = "启用"; _enabledCheckBox.AutoSize = true; _enabledCheckBox.Margin = new(12, 7, 0, 0);
+        void AlignFields()
+        {
+            nameField.Height = shortcutField.Height = _triggerTypeBox.Height;
+            nameField.PerformLayout(); shortcutField.PerformLayout();
+        }
+        _triggerTypeBox.SizeChanged += (_, _) => AlignFields();
+        AlignFields();
+        _enabledCheckBox.Text = "启用"; _enabledCheckBox.AutoSize = true; _enabledCheckBox.Anchor = AnchorStyles.Left; _enabledCheckBox.Margin = new(12, 0, 0, 0);
         _enabledCheckBox.CheckedChanged += (_, _) => { if (_isBinding || CurrentProfile is null) return; CurrentProfile.Enabled = _enabledCheckBox.Checked; MarkDirty(); };
         panel.Controls.Add(_enabledCheckBox, 3, 1);
         _tips.SetToolTip(inputs, "推荐使用不与其他应用冲突的组合键。单独的字母按键会影响正常输入。F13–F24 适合映射到专用键。" );
@@ -154,7 +169,7 @@ public sealed partial class MainForm
     private Control BuildComposer()
     {
         var panel = Grid(1, 5, 12, rounded: true);
-        panel.RowStyles.Add(new(SizeType.Absolute, 28)); panel.RowStyles.Add(new(SizeType.Absolute, 96));
+        panel.RowStyles.Add(new(SizeType.Absolute, 28)); panel.RowStyles.Add(new(SizeType.Absolute, 84));
         panel.RowStyles.Add(new(SizeType.Absolute, 50)); panel.RowStyles.Add(new(SizeType.Percent, 100)); panel.RowStyles.Add(new(SizeType.Absolute, 46));
         var title = Grid(2, 1); title.ColumnStyles.Add(new(SizeType.Percent, 100)); title.ColumnStyles.Add(new(SizeType.Absolute, 300));
         title.Controls.Add(Heading("选择鼠标位置"), 0, 0);

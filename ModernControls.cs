@@ -30,12 +30,11 @@ internal class SoftButton : Button
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics; g.Clear(Parent?.BackColor ?? Theme.CurrentBg); g.SmoothingMode = SmoothingMode.AntiAlias;
-        var accent = Tag as string == "AccentButton";
         var color = !Enabled ? Theme.CurrentCard : _pressed ? Theme.CurrentListSelectedBg : _hover ? FlatAppearance.MouseOverBackColor : BackColor;
         using var path = RoundedGeometry.Path(new RectangleF(.5f, .5f, Width - 1, Height - 1), 8 * DeviceDpi / 96f);
         using var fill = new SolidBrush(color); g.FillPath(fill, path);
-        if (Focused || accent || Tag as string == "DangerButton")
-        { using var pen = new Pen(Focused ? Theme.CurrentAccent : FlatAppearance.BorderColor); g.DrawPath(pen, path); }
+        using var pen = new Pen(Focused ? Theme.CurrentAccent : Enabled ? FlatAppearance.BorderColor : Theme.CurrentBorder);
+        g.DrawPath(pen, path);
         TextRenderer.DrawText(g, Text, Font, ClientRectangle, Enabled ? ForeColor : Theme.CurrentTextMuted,
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
     }
@@ -57,6 +56,46 @@ internal sealed class PillLabel : Label
 internal class SoftComboBox : ComboBox
 {
     protected override void OnSizeChanged(EventArgs e) { base.OnSizeChanged(e); RoundedGeometry.Clip(this, 5); }
+}
+
+// Keep a native single-line editor (including its keyboard behavior), centered in
+// a field with the same outside height as the adjacent native dropdown.
+internal sealed class InputSurface : Panel
+{
+    public InputSurface() { DoubleBuffered = true; TabStop = false; }
+    protected override void OnControlAdded(ControlEventArgs e)
+    {
+        base.OnControlAdded(e);
+        e.Control!.Enter += (_, _) => Invalidate();
+        e.Control.Leave += (_, _) => Invalidate();
+    }
+    protected override void OnLayout(LayoutEventArgs e)
+    {
+        base.OnLayout(e);
+        var inset = (int)Math.Round(10 * DeviceDpi / 96f);
+        foreach (Control child in Controls)
+        {
+            child.Dock = DockStyle.None;
+            var height = child is TextBoxBase textBox ? textBox.PreferredHeight : child.PreferredSize.Height;
+            child.SetBounds(inset, Math.Max(1, (ClientSize.Height - height) / 2),
+                Math.Max(1, ClientSize.Width - 2 * inset), height);
+        }
+    }
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        base.OnMouseDown(e);
+        foreach (Control child in Controls) if (child.Visible && child.CanFocus) { child.Focus(); break; }
+    }
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+        e.Graphics.Clear(Parent?.BackColor ?? Theme.CurrentBg);
+        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        using var path = RoundedGeometry.Path(new RectangleF(.5f, .5f, Width - 1, Height - 1), 5 * DeviceDpi / 96f);
+        using var fill = new SolidBrush(Theme.CurrentInputBg);
+        using var pen = new Pen(ContainsFocus ? Theme.CurrentAccent : Theme.CurrentBorder);
+        e.Graphics.FillPath(fill, path); e.Graphics.DrawPath(pen, path);
+    }
 }
 
 internal sealed class AppMenu : ContextMenuStrip

@@ -4,7 +4,7 @@ internal static class Theme
 {
     public static bool IsDark { get; private set; }
 
-    public static readonly Color Bg = Color.FromArgb(0xF5, 0xF6, 0xF8);
+    public static readonly Color Bg = Color.FromArgb(0xF3, 0xF6, 0xFB);
     public static readonly Color Surface = Color.White;
     public static readonly Color Card = Color.FromArgb(0xEC, 0xF1, 0xF9);
     public static readonly Color Border = Color.FromArgb(0xD7, 0xDF, 0xEC);
@@ -28,6 +28,8 @@ internal static class Theme
     public static Color CurrentSurface => IsDark ? Color.FromArgb(0x21, 0x27, 0x31) : Surface;
     public static Color CurrentCard => IsDark ? Color.FromArgb(0x2C, 0x35, 0x43) : Card;
     public static Color CurrentBorder => IsDark ? Color.FromArgb(0x3B, 0x45, 0x55) : Border;
+    public static Color CurrentButtonBg => IsDark ? Color.FromArgb(0x29, 0x34, 0x46) : Color.FromArgb(0xED, 0xF3, 0xFC);
+    public static Color CurrentButtonBorder => IsDark ? Color.FromArgb(0x4B, 0x5C, 0x76) : Color.FromArgb(0xC4, 0xD3, 0xE8);
     public static Color CurrentAccent => IsDark ? Color.FromArgb(0x82, 0xAE, 0xFF) : Accent;
     public static Color CurrentAccentDim => IsDark ? Color.FromArgb(0x39, 0xAD, 0xE5) : AccentDim;
     public static Color CurrentTextPrimary => IsDark ? Color.FromArgb(0xE0, 0xE0, 0xF0) : TextPrimary;
@@ -61,10 +63,10 @@ internal static class Theme
     {
         button.FlatStyle = FlatStyle.Flat;
         button.FlatAppearance.BorderSize = 1;
-        button.FlatAppearance.BorderColor = CurrentBorder;
+        button.FlatAppearance.BorderColor = CurrentButtonBorder;
         button.FlatAppearance.MouseOverBackColor = CurrentCard;
         button.FlatAppearance.MouseDownBackColor = CurrentAccentDim;
-        button.BackColor = CurrentSurface;
+        button.BackColor = CurrentButtonBg;
         button.ForeColor = CurrentTextPrimary;
         button.Font = BodyFont;
         button.Cursor = Cursors.Hand;
@@ -99,7 +101,7 @@ internal static class Theme
     {
         textBox.BackColor = CurrentInputBg;
         textBox.ForeColor = CurrentTextPrimary;
-        textBox.BorderStyle = BorderStyle.FixedSingle;
+        textBox.BorderStyle = textBox.Parent is InputSurface ? BorderStyle.None : BorderStyle.FixedSingle;
         textBox.Font = BodyFont;
     }
 
@@ -212,7 +214,7 @@ internal static class Theme
 
     public static void StyleStatusBar(Label label)
     {
-        label.BackColor = CurrentSurface;
+        label.BackColor = Color.Transparent;
         label.ForeColor = CurrentTextSecondary;
         label.Font = BodyFont;
         label.Padding = new Padding(8, 0, 0, 0);
