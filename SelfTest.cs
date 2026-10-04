@@ -32,6 +32,16 @@ internal static class SelfTest
             Check("autorepeat suppressed", state.Update((int)Keys.F13, true) && !state.Update((int)Keys.F13, true));
             state.Update((int)Keys.F13, false); Check("next physical press allowed", state.Update((int)Keys.F13, true));
             var dedup = new TriggerDeduplicator();
+            var reconnect = new VmwareReconnectBudget();
+            Check("no rehook outside VMware", !reconnect.Request());
+            reconnect.ObserveForeground(123);
+            Check("VMware entry schedules one rehook", reconnect.Request() && !reconnect.Request() && reconnect.Consume());
+            Check("one later grab click can reconnect", reconnect.Request() && reconnect.Consume());
+            Check("VMware clicks cannot cause hook race", !reconnect.Request() && !reconnect.Consume());
+            reconnect.ObserveForeground(0); reconnect.ObserveForeground(123);
+            Check("new VMware visit resets rehook budget", reconnect.Request());
+            reconnect.ObserveForeground(0);
+            Check("leaving VMware cancels pending rehook", !reconnect.Consume() && !reconnect.Request());
             Check("multiple input paths deduplicated", dedup.Accept("a", "hook", 1234) && !dedup.Accept("a", "raw", 1234) && !dedup.Accept("a", "system", 1235));
             Check("quick second press allowed", dedup.Accept("a", "hook", 1250));
             dedup.Clear(); Check("native timestamp wrap", dedup.Accept("a", "hook", uint.MaxValue - 5) && !dedup.Accept("a", "raw", 5));

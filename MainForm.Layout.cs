@@ -229,7 +229,7 @@ public sealed partial class MainForm
         _rawInputCheck.Text = "启用后台输入补充（VMware / UU 远程）"; _rawInputCheck.AutoSize = true;
         _rawInputCheck.CheckedChanged += (_, _) => { if (_isBinding) return; SavePreferences(); RebuildHotkeys(); };
         var raw = Grid(1, 2); raw.RowStyles.Add(new(SizeType.Absolute, 30)); raw.RowStyles.Add(new(SizeType.Percent, 100));
-        raw.Controls.Add(_rawInputCheck, 0, 0); raw.Controls.Add(Hint("此方式不拦截按键，远端可能同时收到同一快捷键。建议使用 F13–F24 等专用映射键。"), 0, 1);
+        raw.Controls.Add(_rawInputCheck, 0, 0); raw.Controls.Add(Hint("后台输入不拦截按键；进入 VMware 后最多重连监听两次。建议使用专用键，避免远端同时响应。"), 0, 1);
         panel.Controls.Add(raw, 0, 2);
         _lastSignal.Dock = DockStyle.Fill; _lastSignal.Font = Theme.BodyFont; _lastSignal.ForeColor = Theme.CurrentAccent;
         _lastSignal.Text = "尚未检测。勾选“只检测”，切到 VMware / UU 后按方案快捷键，再回来查看来源。";

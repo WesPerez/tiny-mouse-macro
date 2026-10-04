@@ -22,6 +22,10 @@ public sealed class HotkeyService : IDisposable
     private string? _configurationKey;
     private List<string> _registrationErrors = [];
     private readonly System.Windows.Forms.Timer _stateRecovery = new() { Interval = 500 };
+    private readonly System.Windows.Forms.Timer _vmwareRecoveryTimer = new() { Interval = 300 };
+    private readonly VmwareReconnectBudget _vmwareReconnect = new();
+    private bool _vmwareForeground;
+    private long _lastMismatch;
     private long _lastKeyboardActivity;
     private nint _lastForeground;
     private int _registeredCount;
@@ -58,12 +62,14 @@ public sealed class HotkeyService : IDisposable
     public event Action<HotkeySignal>? Triggered;
     public event Action? EmergencyStop;
     public event Action? PauseRequested;
+    public event Action<string>? DiagnosticMessage;
     public HotkeyService()
     {
         _thread.MessageReceived = OnMessage;
         _thread.Invoke(() =>
         {
             _stateRecovery.Tick += (_, _) => RecoverKeyState();
+            _vmwareRecoveryTimer.Tick += (_, _) => ReconnectForVmware();
             _stateRecovery.Start();
         });
     }
@@ -108,7 +114,7 @@ public sealed class HotkeyService : IDisposable
             _keyboardProc = KeyboardCallback;
             _keyboardHook = NativeMethods.SetWindowsHookExW(NativeMethods.WhKeyboardLl, _keyboardProc, NativeMethods.GetModuleHandleW(null), 0);
             if (_keyboardHook == 0) errors.Add("键盘兼容监听启动失败：" + LastError());
-            if (_mouse.Count > 0)
+            if (_mouse.Count > 0 || rawInput)
             {
                 _mouseProc = MouseCallback;
                 _mouseHook = NativeMethods.SetWindowsHookExW(NativeMethods.WhMouseLl, _mouseProc, NativeMethods.GetModuleHandleW(null), 0);
@@ -165,6 +171,7 @@ public sealed class HotkeyService : IDisposable
                 if (down && _swallowed.Contains(key)) return 1;
                 if (down && fresh && _keyboard.TryGetValue(new(key, _hookState.Modifiers), out var b) && CanDispatch(b))
                 { Dispatch(b, "键盘监听", kb.Time); _swallowed.Add(key); return 1; }
+                if (down && fresh) ReportUnmatchedKey(key, _hookState.Modifiers, "键盘监听");
             }
         }
         catch { /* Do not propagate managed exceptions through a native hook. */ }
@@ -175,13 +182,21 @@ public sealed class HotkeyService : IDisposable
     {
         try
         {
-            if (code >= 0 && message is NativeMethods.WmMButtonDown or NativeMethods.WmXButtonDown)
+            if (code >= 0 && message is NativeMethods.WmLbuttonDown or NativeMethods.WmMButtonDown or NativeMethods.WmXButtonDown)
             {
                 var ms = Marshal.PtrToStructure<NativeMethods.Msllhookstruct>(data);
                 if ((nuint)ms.DwExtraInfo != NativeMethods.MacroInputTag)
                 {
-                    var button = message == NativeMethods.WmMButtonDown ? 3 : (int)(ms.MouseData >> 16) + 3;
-                    if (_mouse.TryGetValue(button, out var b) && CanDispatch(b)) Dispatch(b, "鼠标监听", ms.Time);
+                    if (message == NativeMethods.WmLbuttonDown)
+                    {
+                        // Observe only. No process lookup or hook changes in the callback.
+                        if (_rawEnabled) _thread.Post(ObserveVmwareClick);
+                    }
+                    else
+                    {
+                        var button = message == NativeMethods.WmMButtonDown ? 3 : (int)(ms.MouseData >> 16) + 3;
+                        if (_mouse.TryGetValue(button, out var b) && CanDispatch(b)) Dispatch(b, "鼠标监听", ms.Time);
+                    }
                 }
             }
         }
@@ -227,8 +242,12 @@ public sealed class HotkeyService : IDisposable
             if (key == (int)Keys.Menu) key = (kb.Flags & 2) != 0 ? (int)Keys.RMenu : (int)Keys.LMenu;
             if (key == (int)Keys.ShiftKey) key = kb.MakeCode == 0x36 ? (int)Keys.RShiftKey : (int)Keys.LShiftKey;
             var down = (kb.Flags & 1) == 0;
-            if (_rawState.Update(key, down) && down && _keyboard.TryGetValue(new(key, _rawState.Modifiers), out var b) && CanDispatch(b))
-                Dispatch(b, "后台输入（不拦截）", unchecked((uint)NativeMethods.GetMessageTime()));
+            if (_rawState.Update(key, down) && down)
+            {
+                if (_keyboard.TryGetValue(new(key, _rawState.Modifiers), out var b) && CanDispatch(b))
+                    Dispatch(b, "后台输入（不拦截）", unchecked((uint)NativeMethods.GetMessageTime()));
+                else ReportUnmatchedKey(key, _rawState.Modifiers, "后台输入");
+            }
         }
         finally { Marshal.FreeHGlobal(memory); }
     }
@@ -243,15 +262,72 @@ public sealed class HotkeyService : IDisposable
         {
             _lastForeground = foreground;
             _hookState.SynchronizeModifiers(); _rawState.SynchronizeModifiers();
+            _vmwareForeground = _rawEnabled && IsVmwareWindow(foreground);
+            _vmwareReconnect.ObserveForeground(_vmwareForeground ? foreground : 0);
+            if (_vmwareForeground) RequestVmwareReconnect();
+            else _vmwareRecoveryTimer.Stop();
         }
-        // Do not poll at keyboard rate or fight other applications' hook order.
+        // No recurring hook reinstalls: only bounded VMware focus/click transitions.
         // A quiet period clears stale main-key latches after missed key-up / desktop changes.
         if (Environment.TickCount64 - _lastKeyboardActivity < 1500) return;
         _hookState.RemoveReleasedKeys(); _rawState.RemoveReleasedKeys();
         _swallowed.RemoveWhere(key => (NativeMethods.GetAsyncKeyState(key) & 0x8000) == 0);
     }
+    private void ObserveVmwareClick()
+    {
+        if (!_rawEnabled || _suspended || _paused) return;
+        RecoverKeyState();
+        if (_vmwareForeground) RequestVmwareReconnect();
+    }
+    private void RequestVmwareReconnect()
+    {
+        if (_suspended || _paused || !_vmwareReconnect.Request()) return;
+        _vmwareRecoveryTimer.Start();
+    }
+    private void ReconnectForVmware()
+    {
+        _vmwareRecoveryTimer.Stop();
+        if (!_vmwareReconnect.Consume() || !_rawEnabled || _suspended || _paused ||
+            NativeMethods.GetForegroundWindow() != _lastForeground || !_vmwareForeground || _keyboardProc is null) return;
+        // Install first: a failed replacement leaves the old hook intact.
+        var replacement = NativeMethods.SetWindowsHookExW(NativeMethods.WhKeyboardLl, _keyboardProc, NativeMethods.GetModuleHandleW(null), 0);
+        if (replacement == 0) { DiagnosticMessage?.Invoke("VMware 监听重连失败：" + LastError()); return; }
+        var previous = _keyboardHook; _keyboardHook = replacement;
+        if (previous != 0) NativeMethods.UnhookWindowsHookEx(previous);
+        // Keep key-down/up pairing, swallowed keys and all system registrations.
+        DiagnosticMessage?.Invoke("VMware 抓取后已重连键盘监听；请松开组合键后再按一次。重连不代表已收到按键。");
+    }
+    private void ReportUnmatchedKey(int key, uint modifiers, string source)
+    {
+        if (!_diagnostic || _suspended || _paused || HotkeyParser.IsModifierKey((Keys)key)) return;
+        var expected = _keyboard.Values.Where(b => b.Chord.Key == key && !b.Id.StartsWith('$')).Select(b => b.Chord.ToString()).ToArray();
+        var now = Environment.TickCount64;
+        if (expected.Length == 0 || now - _lastMismatch < 800) return;
+        _lastMismatch = now;
+        _thread.Post(() =>
+        {
+            var asyncState = new KeyEventState(); asyncState.SynchronizeModifiers();
+            DiagnosticMessage?.Invoke($"{source}收到 {HotkeyParser.Normalize(modifiers, (uint)key)}，未匹配 {string.Join(" / ", expected)}；系统当前修饰键：{HotkeyParser.FormatModifiers(asyncState.Modifiers)}。未执行。");
+        });
+    }
+    private static bool IsVmwareWindow(nint window)
+    {
+        NativeMethods.GetWindowThreadProcessId(window, out var id);
+        try
+        {
+            using var process = System.Diagnostics.Process.GetProcessById(id);
+            return process.ProcessName.Equals("vmware", StringComparison.OrdinalIgnoreCase) ||
+                process.ProcessName.Equals("vmware-vmx", StringComparison.OrdinalIgnoreCase) ||
+                process.ProcessName.Equals("mksSandbox", StringComparison.OrdinalIgnoreCase);
+        }
+        catch (ArgumentException) { return false; }
+        catch (InvalidOperationException) { return false; }
+        catch (Win32Exception) { return false; }
+    }
     private void ClearCore()
     {
+        _vmwareRecoveryTimer.Stop(); _vmwareReconnect.ObserveForeground(0);
+        _lastForeground = 0; _vmwareForeground = false;
         foreach (var id in _registered.Keys) NativeMethods.UnregisterHotKey(_thread.Handle, id);
         _registered.Clear(); _keyboard.Clear(); _mouse.Clear();
         if (_keyboardHook != 0) NativeMethods.UnhookWindowsHookEx(_keyboardHook);
@@ -266,7 +342,7 @@ public sealed class HotkeyService : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        _thread.Invoke(() => { _stateRecovery.Dispose(); ClearCore(); });
+        _thread.Invoke(() => { _stateRecovery.Dispose(); ClearCore(); _vmwareRecoveryTimer.Dispose(); });
         _thread.Dispose();
     }
     private sealed record Binding(string Id, string Name, KeyChord Chord);
@@ -275,6 +351,29 @@ public sealed class HotkeyService : IDisposable
 internal readonly record struct KeyChord(int Key, uint Modifiers)
 {
     public override string ToString() => HotkeyParser.Normalize(Modifiers, (uint)Key);
+}
+
+// Entry plus one subsequent grab click per foreground visit. Never an endless hook race.
+internal sealed class VmwareReconnectBudget
+{
+    private nint _window;
+    private int _remaining;
+    private bool _pending;
+    public void ObserveForeground(nint window)
+    {
+        if (_window == window) return;
+        _window = window; _remaining = window == 0 ? 0 : 2; _pending = false;
+    }
+    public bool Request()
+    {
+        if (_window == 0 || _pending || _remaining == 0) return false;
+        _pending = true; return true;
+    }
+    public bool Consume()
+    {
+        if (!_pending) return false;
+        _pending = false; _remaining--; return true;
+    }
 }
 
 internal sealed class KeyEventState

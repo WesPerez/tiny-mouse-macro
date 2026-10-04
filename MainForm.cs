@@ -126,6 +126,7 @@ public sealed partial class MainForm : Form
             });
             _hotkeys.EmergencyStop += () => { _executor.Cancel(); PostToUi(StopAll); };
             _hotkeys.PauseRequested += () => PostToUi(ToggleGlobalPause);
+            _hotkeys.DiagnosticMessage += message => PostToUi(() => { _lastSignal.Text = message; Log(message); });
         }
 
         _executor.ChainMacroRequested += chainId =>
