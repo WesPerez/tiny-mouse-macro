@@ -61,6 +61,8 @@ namespace TinyMouseMacro {
         [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
         [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool QueryFullProcessImageName(IntPtr process, uint flags, StringBuilder buffer, ref uint size);
         [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+        [DllImport("shell32.dll", CharSet=CharSet.Unicode)]
+        public static extern void SHChangeNotify(uint eventId, uint flags, string item1, string item2);
         public static string PathOf(int pid) {
             var handle = OpenProcess(0x1000, false, pid);
             if (handle == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
@@ -199,6 +201,11 @@ try {
         catch { throw "Deployment succeeded, but desktop cleanup is incomplete: $($legacy.Path). $($_.Exception.Message)" }
         Write-Output "Recycled legacy file: $($legacy.Path)"
     }
+    # File.Replace updates the file, but the shell view also needs an explicit change
+    # notification. No Explorer restart, foreground activation or icon rearrangement.
+    [TinyMouseMacro.DeploymentProcess]::SHChangeNotify(0x2000, 0x3005, $shortcutPath, $null)
+    [TinyMouseMacro.DeploymentProcess]::SHChangeNotify(0x1000, 0x3005, $desktopDirectory, $null)
+    Write-Output 'Desktop shell notified of shortcut update.'
 }
 finally {
     Pop-Location
