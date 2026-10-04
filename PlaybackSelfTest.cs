@@ -18,9 +18,59 @@ internal static class PlaybackSelfTest
 
         desktop = new() { ActivationWorks = false, Remote = true, Clipped = true };
         input = new(desktop); executor = new(desktop, input);
-        check("focus denial stops whole multi-step macro without any click or key",
+        check("denied activation and unresponsive click stops before typing and never clicks twice",
             Fails(() => executor.RunAsync(new() { Steps = [Click(), Key()] }).GetAwaiter().GetResult()) &&
-            input.Events.Count == 0 && desktop.Moves == 0 && desktop.Activations == 6 && desktop.Releases == 0);
+            input.Events.SequenceEqual(["mouse:2@11", "mouse:4@11"]) && desktop.Activations == 1);
+
+        desktop = new() { ActivationWorks = false, Remote = true, Clipped = true };
+        input = new(desktop); executor = new(desktop, input);
+        input.AfterInput = () => { if (input.Events.Last() == "mouse:4@11") desktop.Foreground = 22; };
+        executor.RunAsync(new() { Steps = [Click(), Key()] }).GetAwaiter().GetResult();
+        check("denied foreground request uses original click then types at confirmed destination", desktop.Activations == 1 &&
+            input.Events.SequenceEqual(["mouse:2@11", "mouse:4@11", "key:65:True@22", "key:65:False@22"]));
+
+        desktop = new() { ActivationWorks = false, Remote = true, Clipped = true, DelayedMoves = 99 };
+        input = new(desktop); executor = new(desktop, input);
+        check("click activation fallback never clicks an unreachable point",
+            Fails(() => executor.RunAsync(new() { Steps = [Click(), Key()] }).GetAwaiter().GetResult()) && input.Events.Count == 0);
+
+        desktop = new() { Remote = true }; input = new(desktop); executor = new(desktop, input);
+        input.AfterInput = () => { if (input.Events.Last() == "mouse:4@22") { desktop.Cursor = new(999, 300); desktop.Clipped = true; } };
+        executor.RunAsync(new() { Steps = [Click(), Key()] }).GetAwaiter().GetResult();
+        check("post-click recapture corrects movement without replaying button and before typing", desktop.Cursor.X == 1500 &&
+            desktop.Releases == 1 && input.Events.Count == 4 && desktop.Moves == 2);
+
+        desktop = new() { Remote = true }; input = new(desktop); executor = new(desktop, input);
+        var clickDelays = new List<int>();
+        input.AfterInput = () => { if (input.Events.Last() == "mouse:2@22") clickDelays.Add(desktop.Delays); };
+        var doubleClick = Click(); doubleClick.Type = MacroStepType.DoubleClick;
+        executor.RunAsync(new() { Steps = [doubleClick] }).GetAwaiter().GetResult();
+        check("double click has no handoff correction wait between button pairs", clickDelays.Count == 2 && clickDelays[0] == clickDelays[1] && input.Events.Count == 4);
+
+        desktop = new() { ActivationWorks = false }; input = new(desktop); executor = new(desktop, input);
+        check("named window denial never falls back to speculative click",
+            Fails(() => executor.RunAsync(new() { TargetWindowTitle = "test", Steps = [Key()] }).GetAwaiter().GetResult()) && input.Events.Count == 0);
+
+        var bounds = new Rectangle(-1920, -1080, 8320, 2520);
+        var motion = WindowsPlaybackInput.AbsoluteMovePacket(new(2272, -457), bounds).U.Mi;
+        var decoded = new Point(bounds.X + (int)((long)motion.Dx * bounds.Width / 65536), bounds.Y + (int)((long)motion.Dy * bounds.Height / 65536));
+        check("absolute motion maps negative multi-monitor coordinates to the requested pixel", decoded == new Point(2272, -457));
+        check("absolute motion carries virtual-desktop no-coalesce and injection tag", motion.Flags == 0xE001 && motion.ExtraInfo == (nuint)NativeMethods.MacroInputTag);
+        foreach (var edge in new[] { bounds.Location, new Point(bounds.Right - 1, bounds.Bottom - 1) })
+        {
+            motion = WindowsPlaybackInput.AbsoluteMovePacket(edge, bounds).U.Mi;
+            decoded = new(bounds.X + (int)((long)motion.Dx * bounds.Width / 65536), bounds.Y + (int)((long)motion.Dy * bounds.Height / 65536));
+            check("absolute desktop edge " + edge, decoded == edge);
+        }
+
+        var queue = new SwitchRequestQueue();
+        var a = new MacroProfile { Steps = [Click()] }; var b = new MacroProfile { Steps = [Click()] }; var c = new MacroProfile { Steps = [Click()] };
+        check("switch queue keeps last destination only", queue.Offer(a, b) && queue.Offer(a, c) && queue.Take() == c.Id && queue.Take() is null);
+        queue.Offer(a, b); queue.Offer(a, a);
+        check("repeated current shortcut never queues a duplicate click", queue.Take() is null);
+        queue.Offer(a, b); queue.Clear();
+        check("stop clears pending destination", queue.Take() is null);
+        check("arbitrary macros never enter switch queue", !queue.Offer(a, new() { Steps = [Click(), Key()] }) && !queue.Offer(new() { RepeatCount = 0, Steps = [Click()] }, a));
 
         desktop = new() { Remote = true, Clipped = true, DelayedMoves = 99 };
         input = new(desktop); executor = new(desktop, input);
@@ -142,5 +192,10 @@ internal static class PlaybackSelfTest
         public void Key(int key, bool down) => Add($"key:{key}:{down}");
         public void Character(char character) => Add($"char:{character}");
         public void Mouse(uint flags, uint data = 0) => Add($"mouse:{flags}");
+        public void MouseAt(Point point, uint flags)
+        {
+            InputWasReady &= PointerPlacement.IsAtTarget(desktop.Cursor, point);
+            Mouse(flags);
+        }
     }
 }

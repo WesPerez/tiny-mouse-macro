@@ -27,6 +27,8 @@ internal sealed class PlaybackSession(IPlaybackDesktop desktop, Action<string>? 
     private nint _remoteWindow;
     private bool _remoteWindowKnown, _remoteValue;
     private bool _acceptNextForeground;
+    private nint _clickTarget;
+    private bool _leavingRemote;
 
     // RunProgram and explicit window-switch keys intentionally change the target. Bind at
     // the next action, after any recorded/manual wait for that application to become ready.
@@ -63,23 +65,26 @@ internal sealed class PlaybackSession(IPlaybackDesktop desktop, Action<string>? 
         await ActivateAsync(target, () => desktop.IsWindow(target), ct);
     }
 
-    private async Task ActivateAsync(nint target, Func<bool> unchanged, CancellationToken ct)
+    private async Task ActivateAsync(nint target, Func<bool> unchanged, CancellationToken ct, bool allowClickActivation = false)
     {
         VerifyFocus();
         if (target == _expected) return;
         var source = _expected;
         log?.Invoke($"自动交接焦点 · 0x{source:X} → 0x{target:X}");
         await WindowActivation.EnsureForegroundAsync(source, target, () => desktop.Foreground,
-            () => desktop.Activate(target), unchanged, desktop.Delay, ct, log);
-        _expected = target;
+            () => desktop.Activate(target), unchanged, desktop.Delay, ct, log, allowClickActivation);
+        if (desktop.Foreground == target) _expected = target;
+        else _clickTarget = target;
     }
 
-    internal async Task PlaceAsync(Point point, bool clicking, CancellationToken ct)
+    internal async Task PlaceAsync(Point point, bool clicking, CancellationToken ct, bool allowClickActivation = false)
     {
         ct.ThrowIfCancellationRequested();
         VerifyFocus();
         if (!desktop.IsOnScreen(point)) throw new InvalidOperationException("目标位置不在当前显示器上，请重新取点。");
         var source = _expected;
+        _clickTarget = 0;
+        _leavingRemote = false;
         var target = desktop.WindowAt(point);
         var outsideClip = desktop.OutsideClip(point);
         // Moving over a normal background window is a hover, not an activation request.
@@ -88,10 +93,17 @@ internal sealed class PlaybackSession(IPlaybackDesktop desktop, Action<string>? 
         var handoff = crossing && (clicking || outsideClip || IsRemote(source));
         if (handoff)
         {
-            await ActivateAsync(target, () => desktop.WindowAt(point) == target, ct);
-            // Only remove a clip that blocks this requested point, after focus has left its owner.
+            _leavingRemote = IsRemote(source);
+            await ActivateAsync(target, () => desktop.WindowAt(point) == target, ct, allowClickActivation);
+            // Remove only a clip obstructing the explicitly requested point. When activation
+            // is denied, motion and the original click must complete the transition instead.
             if (desktop.OutsideClip(point) && !desktop.ReleaseClip())
                 throw new InvalidOperationException("无法解除阻挡目标位置的鼠标限制，已停止操作。");
+        }
+        bool MoveRequested()
+        {
+            if (handoff && desktop.OutsideClip(point) && !desktop.ReleaseClip()) return false;
+            return desktop.Move(point);
         }
         bool Unchanged() => desktop.Foreground == _expected &&
             (!clicking && !handoff || desktop.WindowAt(point) == target);
@@ -101,8 +113,20 @@ internal sealed class PlaybackSession(IPlaybackDesktop desktop, Action<string>? 
             if (!desktop.Move(point)) throw new InvalidOperationException("系统拒绝移动鼠标。");
             if (PointerPlacement.IsAtTarget(desktop.Cursor, point)) return;
         }
-        await PointerPlacement.MoveUntilStableAsync(point, () => desktop.Move(point), () => desktop.Cursor,
+        await PointerPlacement.MoveUntilStableAsync(point, MoveRequested, () => desktop.Cursor,
             Unchanged, desktop.Delay, ct, log);
+        if (_leavingRemote)
+        {
+            // The console can asynchronously restore the pre-ungrab cursor. Process real
+            // motion and wait before sending the one and only button action.
+            await desktop.Delay(160, ct);
+            if (!Unchanged()) throw new InvalidOperationException("目标窗口发生变化，已停止操作。");
+            if (desktop.OutsideClip(point) && _expected == target && !desktop.ReleaseClip())
+                throw new InvalidOperationException("鼠标仍被限制，已停止操作。");
+            if (!PointerPlacement.IsAtTarget(desktop.Cursor, point) || desktop.OutsideClip(point))
+                await PointerPlacement.MoveUntilStableAsync(point, MoveRequested, () => desktop.Cursor,
+                    Unchanged, desktop.Delay, ct, log);
+        }
         VerifyFocus();
         if (handoff) log?.Invoke($"跨窗口定位已验证 · ({point.X}, {point.Y})");
     }
@@ -112,6 +136,43 @@ internal sealed class PlaybackSession(IPlaybackDesktop desktop, Action<string>? 
         VerifyFocus();
         if (!PointerPlacement.IsAtTarget(desktop.Cursor, point))
             throw new InvalidOperationException("执行点击前鼠标位置发生变化，已停止操作。");
+        if (_clickTarget != 0 && desktop.WindowAt(point) != _clickTarget)
+            throw new InvalidOperationException("目标位置被其他窗口遮挡，已停止操作。");
+    }
+
+    internal async Task CompleteClickAsync(Point point, CancellationToken ct, bool settleAfter = true)
+    {
+        if (_clickTarget != 0)
+        {
+            var target = _clickTarget;
+            // A normal mouse click can activate a window even when SetForegroundWindow
+            // was denied. Do not send a second click if WM_MOUSEACTIVATE eats the first.
+            for (var i = 0; i < 5 && desktop.Foreground == _expected; i++) await desktop.Delay(30, ct);
+            if (desktop.Foreground != target)
+                throw new InvalidOperationException("已点击一次，但目标窗口未响应；后续操作已停止。");
+            _expected = target; _clickTarget = 0;
+        }
+        ObserveActionResult();
+        if (!_leavingRemote || !settleAfter) return;
+        for (var i = 0; i < 3; i++)
+        {
+            await desktop.Delay(60, ct);
+            VerifyFocus();
+            if (!PointerPlacement.IsAtTarget(desktop.Cursor, point) || desktop.OutsideClip(point))
+            {
+                log?.Invoke($"点击后位置回弹 · 实际 ({desktop.Cursor.X}, {desktop.Cursor.Y}) · 目标 ({point.X}, {point.Y}) · 限制 {desktop.OutsideClip(point)}");
+                if (desktop.WindowAt(point) != _expected)
+                    throw new InvalidOperationException("点击后目标窗口改变，后续操作已停止。");
+                if (desktop.OutsideClip(point) && !desktop.ReleaseClip())
+                    throw new InvalidOperationException("点击后鼠标再次被限制，后续操作已停止。");
+                // Correct position only. Never duplicate a click to escape capture.
+                await PointerPlacement.MoveUntilStableAsync(point, () => desktop.Move(point), () => desktop.Cursor,
+                    () => desktop.Foreground == _expected && desktop.WindowAt(point) == _expected,
+                    desktop.Delay, ct, log);
+            }
+        }
+        log?.Invoke($"点击后落点已核对 · 实际 ({desktop.Cursor.X}, {desktop.Cursor.Y}) · 前台 0x{desktop.Foreground:X}");
+        _leavingRemote = false;
     }
 
     // A click or key can open/close a dialog in the same application. Accept that result,
@@ -155,7 +216,7 @@ internal sealed class WindowsPlaybackDesktop : IPlaybackDesktop
         !Rectangle.FromLTRB(r.Left, r.Top, r.Right, r.Bottom).Contains(point);
     public bool ReleaseClip() => NativeMethods.ClipCursor(0);
     public bool Activate(nint window) => NativeMethods.SetForegroundWindow(window);
-    public bool Move(Point point) => NativeMethods.SetCursorPos(point.X, point.Y);
+    public bool Move(Point point) => WindowsPlaybackInput.MovePointer(point);
     public Task Delay(int ms, CancellationToken ct) => Task.Delay(ms, ct);
 }
 

@@ -9,7 +9,8 @@ public sealed partial class MainForm
     private ExternalTrigger? _externalTrigger;
     private readonly ScreenMap _screenMap = new();
     private readonly ToolTip _tips = new() { AutoPopDelay = 12000, InitialDelay = 400 };
-    private readonly TabControl _workspaceTabs = new();
+    private readonly TableLayoutPanel _workspace = Grid(1, 1);
+    private Control _composePanel = null!, _optionsPanel = null!, _diagnosticsPanel = null!;
     private readonly System.Windows.Forms.Timer _saveTimer = new() { Interval = 700 };
     private readonly System.Windows.Forms.Timer _recordUiTimer = new() { Interval = 250 };
     private readonly System.Diagnostics.Stopwatch _recordClock = new();
@@ -30,7 +31,7 @@ public sealed partial class MainForm
 
         var heading = Grid(2, 1);
         heading.ColumnStyles.Add(new(SizeType.Percent, 100));
-        heading.ColumnStyles.Add(new(SizeType.Absolute, 430));
+        heading.ColumnStyles.Add(new(SizeType.Absolute, 300));
         var branding = new Panel { Dock = DockStyle.Fill };
         branding.Controls.Add(new Label { Text = "TinyMouseMacro", AutoSize = true, Location = new(0, 0), Font = Theme.TitleFont, Tag = "Title", ForeColor = Theme.CurrentTextPrimary });
         branding.Controls.Add(new Label { Text = "一键切换屏幕，录制与回放常用键鼠操作。", AutoSize = true, Location = new(2, 38), Tag = "Body", Font = Theme.BodyFont, ForeColor = Theme.CurrentTextSecondary });
@@ -42,7 +43,6 @@ public sealed partial class MainForm
         _cancelButton.Width = 172; _cancelButton.Height = 38; _cancelButton.Visible = true;
         primary.Controls.Add(_cancelButton);
         primary.Controls.Add(CreateAccentButton("▶  运行方案", TestRun, 114));
-        primary.Controls.Add(CreateButton("保存  Ctrl+S", SaveAndReload, 116));
         heading.Controls.Add(primary, 1, 0); root.Controls.Add(heading, 0, 0);
 
         var body = Grid(2, 1);
@@ -54,12 +54,12 @@ public sealed partial class MainForm
         workspace.RowStyles.Add(new(SizeType.Absolute, 90));
         workspace.RowStyles.Add(new(SizeType.Percent, 100));
         workspace.Controls.Add(BuildIdentity(), 0, 0);
-        _workspaceTabs.Dock = DockStyle.Fill; _workspaceTabs.Font = Theme.BodyFont;
-        _workspaceTabs.Padding = new Point(18, 9);
-        TabPage compose = Page("动作编排"), options = Page("运行参数"), diagnostics = Page("疑难诊断");
-        compose.Controls.Add(BuildComposer()); options.Controls.Add(BuildOptions()); diagnostics.Controls.Add(BuildDiagnostics());
-        _workspaceTabs.TabPages.AddRange([compose, options, diagnostics]);
-        workspace.Controls.Add(_workspaceTabs, 0, 1); body.Controls.Add(workspace, 1, 0);
+        _composePanel = BuildComposer(); _optionsPanel = BuildOptions(); _diagnosticsPanel = BuildDiagnostics();
+        _workspace.Controls.Add(_optionsPanel, 0, 0); _workspace.Controls.Add(_diagnosticsPanel, 0, 0);
+        _workspace.Controls.Add(_composePanel, 0, 0);
+        _optionsPanel.Visible = false; _diagnosticsPanel.Visible = false;
+        _composePanel.BringToFront();
+        workspace.Controls.Add(_workspace, 0, 1); body.Controls.Add(workspace, 1, 0);
 
         var footer = Grid(2, 1);
         footer.ColumnStyles.Add(new(SizeType.Percent, 100)); footer.ColumnStyles.Add(new(SizeType.Absolute, 250));
@@ -97,10 +97,12 @@ public sealed partial class MainForm
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("删除当前方案…", null, (_, _) => DeleteProfile());
         menu.Items.Add("切换明暗主题", null, (_, _) => ToggleTheme());
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add("运行记录…", null, (_, _) => OpenToolPanel(_diagnosticsPanel, "运行记录"));
         more.Click += (_, _) => menu.Show(more, new Point(0, more.Height)); buttons.Controls.Add(more);
         panel.Controls.Add(buttons, 0, 3);
         var bottom = Grid(1, 2); bottom.RowStyles.Add(new(SizeType.Absolute, 40)); bottom.RowStyles.Add(new(SizeType.Percent, 100));
-        _pauseButton.Text = "暂停全部快捷键"; _pauseButton.Dock = DockStyle.Fill; Theme.StyleButton(_pauseButton);
+        _pauseButton.Text = "暂停自动运行"; _pauseButton.Dock = DockStyle.Fill; Theme.StyleButton(_pauseButton);
         _pauseButton.Click += (_, _) => ToggleGlobalPause(); bottom.Controls.Add(_pauseButton, 0, 0);
         bottom.Controls.Add(Hint("Ctrl+Alt+P 暂停 / 恢复"), 0, 1);
         panel.Controls.Add(bottom, 0, 4);
@@ -109,10 +111,11 @@ public sealed partial class MainForm
 
     private Control BuildIdentity()
     {
-        var panel = Grid(3, 2);
+        var panel = Grid(4, 2);
         panel.ColumnStyles.Add(new(SizeType.Percent, 40)); panel.ColumnStyles.Add(new(SizeType.Absolute, 170));
-        panel.ColumnStyles.Add(new(SizeType.Percent, 60)); panel.RowStyles.Add(new(SizeType.Absolute, 28)); panel.RowStyles.Add(new(SizeType.Percent, 100));
-        panel.Controls.Add(Heading("方案名称"), 0, 0); panel.Controls.Add(Heading("触发方式"), 1, 0); panel.Controls.Add(Heading("按下快捷键即可设置"), 2, 0);
+        panel.ColumnStyles.Add(new(SizeType.Percent, 60)); panel.ColumnStyles.Add(new(SizeType.Absolute, 88));
+        panel.RowStyles.Add(new(SizeType.Absolute, 28)); panel.RowStyles.Add(new(SizeType.Percent, 100));
+        panel.Controls.Add(Heading("方案名称"), 0, 0); panel.Controls.Add(Heading("触发方式"), 1, 0); panel.Controls.Add(Heading("快捷键"), 2, 0);
         Theme.StyleTextBox(_nameBox); _nameBox.Dock = DockStyle.Fill; _nameBox.AccessibleName = "方案名称";
         _nameBox.TextChanged += (_, _) =>
         {
@@ -122,7 +125,7 @@ public sealed partial class MainForm
         };
         panel.Controls.Add(_nameBox, 0, 1);
         _triggerTypeBox.DropDownStyle = ComboBoxStyle.DropDownList;
-        _triggerTypeBox.Items.AddRange(["快捷键（推荐）", "直接按键监听", "鼠标侧键 / 中键"]);
+        _triggerTypeBox.Items.AddRange(["键盘快捷键", "鼠标按键"]);
         _triggerTypeBox.Dock = DockStyle.Fill; Theme.StyleComboBox(_triggerTypeBox);
         _triggerTypeBox.SelectedIndexChanged += TriggerTypeBox_SelectedIndexChanged;
         panel.Controls.Add(_triggerTypeBox, 1, 1);
@@ -141,6 +144,9 @@ public sealed partial class MainForm
         _mouseButtonBox.SelectedIndexChanged += (_, _) =>
         { if (_isBinding || CurrentProfile is null) return; CurrentProfile.TriggerMouseButton = _mouseButtonBox.SelectedIndex switch { 0 => 4, 1 => 5, _ => 3 }; MarkDirty(); };
         inputs.Controls.Add(_mouseButtonBox); panel.Controls.Add(inputs, 2, 1);
+        _enabledCheckBox.Text = "启用"; _enabledCheckBox.AutoSize = true; _enabledCheckBox.Margin = new(12, 7, 0, 0);
+        _enabledCheckBox.CheckedChanged += (_, _) => { if (_isBinding || CurrentProfile is null) return; CurrentProfile.Enabled = _enabledCheckBox.Checked; MarkDirty(); };
+        panel.Controls.Add(_enabledCheckBox, 3, 1);
         _tips.SetToolTip(inputs, "推荐使用不与其他应用冲突的组合键。单独的字母按键会影响正常输入。F13–F24 适合映射到专用键。" );
         return panel;
     }
@@ -151,7 +157,7 @@ public sealed partial class MainForm
         panel.RowStyles.Add(new(SizeType.Absolute, 36)); panel.RowStyles.Add(new(SizeType.Absolute, 148));
         panel.RowStyles.Add(new(SizeType.Absolute, 52)); panel.RowStyles.Add(new(SizeType.Percent, 100)); panel.RowStyles.Add(new(SizeType.Absolute, 46));
         var title = Grid(2, 1); title.ColumnStyles.Add(new(SizeType.Percent, 100)); title.ColumnStyles.Add(new(SizeType.Absolute, 300));
-        title.Controls.Add(Heading("01   选择目标位置"), 0, 0);
+        title.Controls.Add(Heading("选择鼠标位置"), 0, 0);
         _livePositionLabel.Dock = DockStyle.Fill; _livePositionLabel.TextAlign = ContentAlignment.MiddleRight;
         _livePositionLabel.Font = Theme.MonoBodyFont; _livePositionLabel.ForeColor = Theme.CurrentTextSecondary;
         title.Controls.Add(_livePositionLabel, 1, 0); panel.Controls.Add(title, 0, 0);
@@ -179,31 +185,26 @@ public sealed partial class MainForm
         edit.Controls.Add(CreateButton("编辑", () => StepList_MouseDoubleClick(null, new(MouseButtons.Left, 2, 0, 0, 0)), 76));
         edit.Controls.Add(CreateButton("复制", DuplicateStep, 76)); edit.Controls.Add(CreateButton("↑", MoveStepUp, 46));
         edit.Controls.Add(CreateButton("↓", MoveStepDown, 46)); edit.Controls.Add(CreateButton("删除", DeleteStep, 76));
-        edit.Controls.Add(Hint("双击编辑 · 拖动排序", 305));
+        edit.Controls.Add(CreateButton("重复与定时…", () => OpenToolPanel(_optionsPanel, "运行设置"), 142));
+        _tips.SetToolTip(_stepList, "双击编辑，拖动调整顺序");
         panel.Controls.Add(edit, 0, 4); return panel;
     }
 
     private Control BuildOptions()
     {
         var scroll = new Panel { Dock = DockStyle.Fill, AutoScroll = true };
-        var panel = Grid(2, 7, 20); panel.Dock = DockStyle.Top; panel.AutoSize = true; scroll.Controls.Add(panel);
+        var panel = Grid(2, 6, 20); panel.Dock = DockStyle.Top; panel.AutoSize = true; scroll.Controls.Add(panel);
         panel.ColumnStyles.Add(new(SizeType.Absolute, 210)); panel.ColumnStyles.Add(new(SizeType.Percent, 100));
         for (var i = 0; i < 6; i++) panel.RowStyles.Add(new(SizeType.Absolute, 52));
-        panel.RowStyles.Add(new(SizeType.Absolute, 80));
-        _enabledCheckBox.Text = "允许快捷键与定时触发"; _enabledCheckBox.AutoSize = true;
-        _enabledCheckBox.CheckedChanged += (_, _) => { if (_isBinding || CurrentProfile is null) return; CurrentProfile.Enabled = _enabledCheckBox.Checked; MarkDirty(); };
-        Option(0, "启用方案", _enabledCheckBox);
         SetupNumber(_repeatCountBox, () => { if (CurrentProfile is { } p) p.RepeatCount = (int)_repeatCountBox.Value; });
         SetupNumber(_repeatIntervalBox, () => { if (CurrentProfile is { } p) p.RepeatIntervalMs = (int)_repeatIntervalBox.Value; });
         SetupNumber(_speedBox, () => { if (CurrentProfile is { } p) p.SpeedMultiplier = (double)_speedBox.Value; });
         SetupNumber(_scheduleIntervalBox, () => { if (CurrentProfile is { } p) { p.ScheduleIntervalMinutes = (int)_scheduleIntervalBox.Value; p.ScheduleNextRun = null; } });
-        Option(1, "重复次数（0 = 持续）", _repeatCountBox); Option(2, "每轮间隔（毫秒）", _repeatIntervalBox);
-        Option(3, "回放速度（倍）", _speedBox); Option(4, "定时运行（分钟；0 = 关闭）", _scheduleIntervalBox);
-        _targetWindowBox.PlaceholderText = "可选：运行前激活的完整窗口标题"; Theme.StyleTextBox(_targetWindowBox);
+        Option(0, "重复次数（0 = 不停）", _repeatCountBox); Option(1, "每轮间隔（毫秒）", _repeatIntervalBox);
+        Option(2, "播放速度（倍）", _speedBox); Option(3, "每隔几分钟运行（0 = 关闭）", _scheduleIntervalBox);
+        _targetWindowBox.PlaceholderText = "留空即可；指定时填写完整窗口名称"; Theme.StyleTextBox(_targetWindowBox);
         _targetWindowBox.TextChanged += (_, _) => { if (_isBinding || CurrentProfile is null) return; CurrentProfile.TargetWindowTitle = _targetWindowBox.Text; MarkDirty(); };
-        Option(5, "目标窗口", _targetWindowBox);
-        var note = Hint("跨窗口的焦点与鼠标定位自动处理。\n录制保留操作间隔；键盘录制默认关闭。停止键：Ctrl+Alt+F10。");
-        panel.Controls.Add(note, 0, 6); panel.SetColumnSpan(note, 2);
+        Option(4, "运行前切换到窗口", _targetWindowBox);
         return scroll;
         void Option(int row, string name, Control input)
         { panel.Controls.Add(Heading(name), 0, row); input.Dock = DockStyle.Top; input.Margin = new(4, 9, 4, 4); panel.Controls.Add(input, 1, row); }
@@ -220,18 +221,17 @@ public sealed partial class MainForm
         _backendLabel.Dock = DockStyle.Fill; _backendLabel.Font = Theme.SectionFont; _backendLabel.ForeColor = Theme.CurrentTextPrimary;
         panel.Controls.Add(_backendLabel, 0, 0);
         var tools = Flow();
-        _diagnosticCheck.Text = "临时只检测（不执行宏）"; _diagnosticCheck.AutoSize = true; _diagnosticCheck.Margin = new(4, 10, 16, 0);
+        _diagnosticCheck.Text = "测试快捷键（不运行操作）"; _diagnosticCheck.AutoSize = true; _diagnosticCheck.Margin = new(4, 10, 16, 0);
         _diagnosticCheck.CheckedChanged += (_, _) =>
         {
             if (_hotkeys is not null) _hotkeys.DiagnosticMode = _diagnosticCheck.Checked;
             if (_diagnosticCheck.Checked) StopAll();
-            if (!_preview) SetStatus(_diagnosticCheck.Checked ? "诊断中：快捷键只记录，不执行宏。离开此页自动恢复。" : "已恢复正常执行");
+            if (!_preview) SetStatus(_diagnosticCheck.Checked ? "正在测试快捷键，暂不执行操作" : "已恢复正常执行");
         };
-        _workspaceTabs.SelectedIndexChanged += (_, _) => { if (_workspaceTabs.SelectedIndex != 2) _diagnosticCheck.Checked = false; };
-        tools.Controls.Add(_diagnosticCheck); tools.Controls.Add(CreateButton("重置输入监听", () => RebuildHotkeys(true), 144)); panel.Controls.Add(tools, 0, 1);
-        panel.Controls.Add(Hint("全局监听与跨窗口定位默认启用。这里仅用于排查问题，日常使用无需调整。"), 0, 2);
+        tools.Controls.Add(_diagnosticCheck); tools.Controls.Add(CreateButton("重新连接快捷键", () => RebuildHotkeys(true), 154)); panel.Controls.Add(tools, 0, 1);
+        panel.Controls.Add(CreateButton("查看详细日志…", OpenActivityLog, 160), 0, 2);
         _lastSignal.Dock = DockStyle.Fill; _lastSignal.Font = Theme.BodyFont; _lastSignal.ForeColor = Theme.CurrentAccent;
-        _lastSignal.Text = "最近一次触发：尚未检测。可临时勾选“只检测”，按方案快捷键后查看记录。";
+        _lastSignal.Text = "尚未收到快捷键";
         panel.Controls.Add(_lastSignal, 0, 3);
         panel.Controls.Add(Heading("最近活动"), 0, 4);
         _logList.Dock = DockStyle.Fill; _logList.IntegralHeight = false; Theme.StyleListBox(_logList);
@@ -246,9 +246,37 @@ public sealed partial class MainForm
         expand.Click += (_, _) => { expanded = !expanded; external.Visible = expanded; advanced.RowStyles[1].Height = expanded ? 52 * DeviceDpi / 96f : 0; expand.Text = expanded ? "高级工具 ▾" : "高级工具 ▸"; };
         _externalTriggerCheck.Text = "允许外部启动器触发切屏"; _externalTriggerCheck.AutoSize = true; _externalTriggerCheck.Margin = new(4, 10, 12, 0);
         _externalTriggerCheck.CheckedChanged += (_, _) => { if (_isBinding) return; SavePreferences(); ConfigureExternalTrigger(); };
-        _tips.SetToolTip(_externalTriggerCheck, "允许当前桌面的本地程序触发已启用的一步移动／点击方案；不允许外部执行脚本、程序或任意命令。只在使用 iCUE 启动器时开启。");
+        _tips.SetToolTip(_externalTriggerCheck, "仅在使用 iCUE 等外部程序启动方案时需要。");
         external.Controls.Add(_externalTriggerCheck); external.Controls.Add(CreateButton("生成启动器…", ExportLauncher, 140));
         advanced.Controls.Add(external, 0, 1); panel.Controls.Add(advanced, 0, 6); return scroll;
+    }
+
+    private void OpenToolPanel(Control panel, string title)
+    {
+        if (_preview) return;
+        if (IsCapturing) { SetStatus("录制结束后可打开设置和记录"); return; }
+        var scale = DeviceDpi / 96f;
+        var area = Screen.FromControl(this).WorkingArea;
+        var width = Math.Min((int)(760 * scale), area.Width - 40);
+        var height = Math.Min((int)(700 * scale), area.Height - 40);
+        using var dialog = new Form { Text = title, StartPosition = FormStartPosition.CenterParent,
+            Size = new(width, height), MinimumSize = new(Math.Min(width, (int)(650 * scale)), Math.Min(height, (int)(550 * scale))),
+            ShowInTaskbar = false, Font = Theme.BodyFont, KeyPreview = true };
+        dialog.KeyDown += (_, e) => { if (e.KeyCode == Keys.Escape) { e.SuppressKeyPress = true; dialog.Close(); } };
+        Theme.ApplyToForm(dialog);
+        dialog.Controls.Add(panel); panel.Visible = true;
+        try { dialog.ShowDialog(this); }
+        finally { _diagnosticCheck.Checked = false; panel.Visible = false; dialog.Controls.Remove(panel); _workspace.Controls.Add(panel, 0, 0); _composePanel.BringToFront(); SaveAll(); }
+    }
+
+    private void OpenActivityLog()
+    {
+        if (_preview) return;
+        if (_executor.IsRunning || _executionCts is not null) { SetStatus("操作结束后可打开详细日志"); return; }
+        var path = Path.Combine(Path.GetDirectoryName(_store.FilePath)!, "activity.log");
+        if (!File.Exists(path)) { SetStatus("还没有运行记录"); return; }
+        try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(path) { UseShellExecute = true }); }
+        catch { SetStatus("日志暂时无法打开，请稍后重试"); }
     }
 
     private void SetupNumber(NumericUpDown input, Action update)
@@ -262,7 +290,6 @@ public sealed partial class MainForm
         return grid;
     }
     private static FlowLayoutPanel Flow() => new() { Dock = DockStyle.Fill, WrapContents = false, Margin = Padding.Empty, BackColor = Theme.CurrentBg };
-    private static TabPage Page(string text) => new(text) { BackColor = Theme.CurrentBg, Padding = Padding.Empty };
     private static Label Heading(string text) => new() { Text = text, Tag = ThemeRoleSectionHeader, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, Font = Theme.SectionFont, ForeColor = Theme.CurrentTextPrimary, AutoEllipsis = true };
     private static Label Hint(string text, int width = 0) => new() { Text = text, Dock = width == 0 ? DockStyle.Fill : DockStyle.None, Width = width, Height = 38, Font = Theme.SmallFont, ForeColor = Theme.CurrentTextSecondary, TextAlign = ContentAlignment.MiddleLeft };
     private Button CreateButton(string text, Action action, int width)
@@ -291,7 +318,7 @@ public sealed partial class MainForm
     {
         var steps = CurrentProfile?.Steps ?? [];
         var ms = steps.Sum(s => (long)(s.RecordedDelayMs ?? 0) + (s.Type == MacroStepType.Delay ? s.DelayMs : 0));
-        _stepSummary.Text = $"02   动作时间线     {steps.Count} 步 · 间隔 {ms / 1000.0:0.##} 秒";
+        _stepSummary.Text = $"操作步骤 · {steps.Count} 步" + (ms > 0 ? $" · 等待共 {ms / 1000.0:0.##} 秒" : "");
         _screenMap.Targets = steps.Where(s => IsPositionStep(s.Type)).Select(s => new Point(s.X, s.Y)).ToArray();
         _screenMap.Invalidate();
     }

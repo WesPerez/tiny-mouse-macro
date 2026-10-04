@@ -205,6 +205,13 @@ public sealed partial class MainForm
         _profileList.SelectedIndex = 1;
         check("selecting scheme binds identity and steps", _nameBox.Text == "右 · UU 远程" && CurrentStep?.X == 4778);
         var first = _profiles[0];
+        var legacy = CurrentProfile!;
+        var savedType = legacy.TriggerType; var savedShortcut = legacy.Hotkey;
+        legacy.TriggerType = MacroTriggerType.KeyboardHook; legacy.TriggerKey = (int)Keys.X; legacy.TriggerModifiers = 4;
+        BindSelectedProfile();
+        _triggerTypeBox.SelectedIndex = 1; _triggerTypeBox.SelectedIndex = 0;
+        check("legacy keyboard chord survives mouse and keyboard selection", legacy.Hotkey == "SHIFT+X");
+        legacy.TriggerType = savedType; legacy.Hotkey = savedShortcut; BindSelectedProfile();
         _startingRecording = true;
         var count = _profiles.Count; var steps = CurrentProfile!.Steps.Count;
         DuplicateProfile(); DeleteStep(); DuplicateStep(); MoveStep(1); AddCustomStep();
@@ -234,9 +241,8 @@ public sealed partial class MainForm
         check("disabled launcher rejects queued message", NativeMethods.SendMessageW(Handle, (int)message, 0, 0) == 0);
         _externalTrigger.Dispose(); _externalTrigger = null;
         _diagnosticCheck.Checked = false;
-        _workspaceTabs.SelectedIndex = 2;
         _diagnosticCheck.Checked = true;
-        _workspaceTabs.SelectedIndex = 0;
+        SelectPreviewPanel(0);
         check("leaving diagnostics restores execution", !_diagnosticCheck.Checked);
     }
     internal void InitializePreview(List<MacroProfile> profiles, Size size)
@@ -246,17 +252,25 @@ public sealed partial class MainForm
         _profiles = profiles; _profilesSource.DataSource = profiles; _profileList.DataSource = _profilesSource;
         _profileList.DisplayMember = nameof(MacroProfile.DisplayText); _profileList.SelectedIndex = 0;
         BindSelectedProfile(); UpdateSummary();
-        _backendLabel.Text = "系统热键 5 · 键盘监听 就绪 · 后台输入 已开启";
+        _backendLabel.Text = "3 个方案可用";
         _statusLabel.Text = "就绪 · 3 个方案可用 · Ctrl+Alt+F10 停止"; _saveState.Text = "更改自动保存";
         SelfTest.CreateHandles(this); PerformAutoScale(); PerformLayout();
     }
     internal void RenderPreview(string path, int tab)
     {
-        _workspaceTabs.SelectedIndex = tab; PerformLayout();
+        SelectPreviewPanel(tab); PerformLayout();
         using var bitmap = new Bitmap(Width, Height);
         DrawToBitmap(bitmap, new(Point.Empty, bitmap.Size)); bitmap.Save(path);
         File.WriteAllLines(path + ".layout.txt", Enumerate(this).Select(c => $"{c.GetType().Name} {c.Text} bounds={c.Bounds} font={c.Font.Size} dpi={c.DeviceDpi} preferred={c.PreferredSize} visible={c.Visible}"));
         static IEnumerable<Control> Enumerate(Control root) { yield return root; foreach(Control c in root.Controls) foreach(var item in Enumerate(c)) yield return item; }
+    }
+    private void SelectPreviewPanel(int page)
+    {
+        if (page != 2) _diagnosticCheck.Checked = false;
+        var panel = page switch { 1 => _optionsPanel, 2 => _diagnosticsPanel, _ => _composePanel };
+        foreach (var item in new[] { _composePanel, _optionsPanel, _diagnosticsPanel }) item.Visible = item == panel;
+        panel.BringToFront();
+        SelfTest.CreateHandles(panel);
     }
     internal bool ValidatePreviewLayout(out string error)
     {

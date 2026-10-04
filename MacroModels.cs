@@ -89,7 +89,7 @@ public sealed class MacroStep
         MacroStepType.MiddleClick => $"{UiText.MiddleClickStepDisplay} ({X}, {Y})",
         MacroStepType.Delay => $"{UiText.DelayStepDisplay} {DelayMs} {UiText.Milliseconds}",
         MacroStepType.KeyPress => $"{UiText.KeyPressStepDisplay} {((Keys)KeyCode).ToString()}",
-        MacroStepType.KeyCombo => $"{UiText.KeyComboStepDisplay} {HotkeyParser.FormatModifiers(KeyModifiers)}+{((Keys)KeyCode).ToString()}",
+        MacroStepType.KeyCombo => $"{UiText.KeyComboStepDisplay} {HotkeyParser.Normalize(KeyModifiers, (uint)KeyCode)}",
         MacroStepType.TypeText => $"{UiText.TypeTextStepDisplay} \"{TextToType}\"",
         MacroStepType.MouseWheel => $"{UiText.WheelStepDisplay} {WheelDelta}",
         MacroStepType.Drag => $"{UiText.DragStepDisplay} ({X}, {Y}) \u2192 ({DragEndX}, {DragEndY})",

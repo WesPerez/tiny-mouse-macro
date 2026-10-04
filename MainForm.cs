@@ -17,6 +17,9 @@ public sealed partial class MainForm : Form
     private readonly System.Windows.Forms.Timer _positionTimer = new() { Interval = 100 };
     private readonly System.Windows.Forms.Timer _scheduleTimer = new() { Interval = 10000 };
     private CancellationTokenSource? _executionCts;
+    private readonly SwitchRequestQueue _switchRequests = new();
+    private string? _runningProfileId;
+    private volatile bool _stopRequested;
 
     private HotkeyService? _hotkeys;
     private RecorderService? _recorder;
@@ -118,15 +121,15 @@ public sealed partial class MainForm : Form
             _hotkeys = new HotkeyService();
             _hotkeys.Triggered += signal => PostToUi(() =>
             {
-                _lastSignal.Text = $"{DateTime.Now:HH:mm:ss}  {signal.Shortcut} · {signal.Source}";
-                Log(_lastSignal.Text + (signal.Diagnostic ? " · 仅检测" : ""));
+                _lastSignal.Text = $"已收到 {signal.Shortcut} · {DateTime.Now:HH:mm:ss}";
+                Log($"{signal.Shortcut} · {signal.Source}" + (signal.Diagnostic ? " · 仅检测" : ""), technical: true);
                 if (signal.Diagnostic || _diagnosticCheck.Checked || _globalPaused || IsCapturing) return;
                 var profile = _profiles.FirstOrDefault(p => p.Id == signal.ProfileId && p.Enabled);
                 if (profile is not null) RunMacro(profile);
             });
-            _hotkeys.EmergencyStop += () => { _executor.Cancel(); PostToUi(StopAll); };
+            _hotkeys.EmergencyStop += () => { _stopRequested = true; _executor.Cancel(); PostToUi(StopAll); };
             _hotkeys.PauseRequested += () => PostToUi(ToggleGlobalPause);
-            _hotkeys.DiagnosticMessage += message => PostToUi(() => { _lastSignal.Text = message; Log(message); });
+            _hotkeys.DiagnosticMessage += message => PostToUi(() => Log(message, technical: true));
         }
 
         _executor.ChainMacroRequested += chainId =>
@@ -243,7 +246,7 @@ public sealed partial class MainForm : Form
     {
         _globalPaused = !_globalPaused;
         if (_hotkeys is not null) _hotkeys.Paused = _globalPaused;
-        _pauseButton.Text = _globalPaused ? "恢复全部快捷键" : "暂停全部快捷键";
+        _pauseButton.Text = _globalPaused ? "恢复自动运行" : "暂停自动运行";
         if (_globalPaused)
         {
             StopAll();
@@ -294,11 +297,17 @@ public sealed partial class MainForm : Form
     {
         if (_isBinding || CurrentProfile is null) return;
 
+        // The UI has one keyboard choice; retain the actual chord when a legacy
+        // hook profile is changed to mouse and back, instead of reviving a stale Hotkey.
+        if (CurrentProfile.TriggerType == MacroTriggerType.KeyboardHook)
+            CurrentProfile.Hotkey = CurrentProfile.TriggerKey > 0
+                ? HotkeyParser.Normalize(CurrentProfile.TriggerModifiers, (uint)CurrentProfile.TriggerKey) : "";
+
         CurrentProfile.TriggerType = _triggerTypeBox.SelectedIndex switch
         {
+            0 when CurrentProfile.TriggerType == MacroTriggerType.KeyboardHook => MacroTriggerType.KeyboardHook,
             0 => MacroTriggerType.KeyboardHotkey,
-            1 => MacroTriggerType.KeyboardHook,
-            2 => MacroTriggerType.MouseButton,
+            1 => MacroTriggerType.MouseButton,
             _ => MacroTriggerType.KeyboardHotkey
         };
 
@@ -321,8 +330,8 @@ public sealed partial class MainForm : Form
             _triggerTypeBox.SelectedIndex = profile?.TriggerType switch
             {
                 MacroTriggerType.KeyboardHotkey => 0,
-                MacroTriggerType.KeyboardHook => 1,
-                MacroTriggerType.MouseButton => 2,
+                MacroTriggerType.KeyboardHook => 0,
+                MacroTriggerType.MouseButton => 1,
                 _ => 0
             };
             _hookKeyBox.Text = profile?.TriggerKey > 0 ? HotkeyParser.Normalize(profile.TriggerModifiers, (uint)profile.TriggerKey) : string.Empty;
@@ -482,7 +491,7 @@ public sealed partial class MainForm : Form
         _profilesSource.ResetBindings(false);
         _profileList.SelectedItem = copy;
         MarkDirty();
-        SetStatus("已复制方案，副本默认停用；设置快捷键后在运行选项启用");
+        SetStatus("已复制方案，副本默认停用；设置快捷键后在上方勾选“启用”");
     }
 
     private void DeleteProfile()
@@ -695,7 +704,7 @@ public sealed partial class MainForm : Form
             for (var i = 3; i >= 1; i--) { _recordButton.Text = $"取消倒计时 {i}"; SetStatus($"{i} 秒后录制；Ctrl+Alt+F10 停止。将追加到当前方案。"); await Task.Delay(1000, cts.Token); }
             _recorder.Start(_recordKeyboardCheck.Checked, Handle);
             _recordClock.Restart(); _recordUiTimer.Start();
-            _profileList.Enabled = false; _workspaceTabs.Enabled = true;
+            _profileList.Enabled = false; _workspace.Enabled = true;
             _recordButton.Text = "■  停止录制"; SetStatus("正在录制操作与真实间隔 · Ctrl+Alt+F10 停止");
         }
         catch (OperationCanceledException) { _recordingProfile = null; }
@@ -835,25 +844,47 @@ public sealed partial class MainForm : Form
         ConfigureExternalTrigger();
         if (_hotkeys is null || IsCapturing || _hotkeyBox.Focused || _hookKeyBox.Focused) return;
         var errors = _hotkeys.RegisterAll(_profiles, force: force);
-        _backendLabel.Text = _hotkeys.BackendStatus;
+        _backendLabel.Text = $"{_hotkeys.RegisteredCount} 个方案可用";
         foreach (var error in errors) Log(error);
-        SetStatus(errors.Count == 0 ? $"就绪 · {_hotkeys.RegisteredCount} 个方案可用 · Ctrl+Alt+F10 停止" : string.Join(" | ", errors));
+        _tips.SetToolTip(_backendLabel, errors.Count == 0 ? "快捷键可以使用" : string.Join("\n", errors));
+        SetStatus(errors.Count == 0 ? "就绪" : "部分快捷键不可用，请在运行记录中查看详情");
     }
 
     private void RunMacro(MacroProfile profile)
     {
         if (_preview || IsCapturing || _globalPaused || _diagnosticCheck.Checked) return;
         if (profile.RepeatCount == 0 && _hotkeys?.StopAvailable != true)
-        { SetStatus("停止快捷键不可用，暂不执行持续循环。请先在诊断页处理快捷键冲突。"); return; }
+        { SetStatus("停止快捷键被占用，请先换一个快捷键再使用持续循环。"); return; }
         if (_executor.IsRunning || _executionCts is not null)
         {
-            SetStatus(UiText.AlreadyRunning);
+            var active = _profiles.FirstOrDefault(p => p.Id == _runningProfileId);
+            if (!_stopRequested && active is not null && _switchRequests.Offer(active, profile))
+            {
+                var message = active.Id == profile.Id ? $"正在切换到：{profile.Name}" : $"接下来切换到：{profile.Name}";
+                SetStatus(message); Log(message);
+            }
+            else { SetStatus(UiText.AlreadyRunning); Log($"正在运行，未执行：{profile.Name}"); }
             return;
         }
 
         SetStatus(UiText.Running(profile.Name));
         Log(UiText.Running(profile.Name));
-        _ = RunWithCancellationAsync(profile);
+        _ = RunAndDrainAsync(profile);
+    }
+
+    private async Task RunAndDrainAsync(MacroProfile profile)
+    {
+        _stopRequested = false;
+        _runningProfileId = profile.Id;
+        try { await RunWithCancellationAsync(profile); }
+        finally
+        {
+            _runningProfileId = null;
+            var nextId = _switchRequests.Take();
+            var next = _profiles.FirstOrDefault(p => p.Id == nextId && p.Enabled);
+            if (next is not null && !_stopRequested && !_globalPaused && !IsCapturing && !_diagnosticCheck.Checked && !IsDisposed)
+                RunMacro(next);
+        }
     }
 
     private async Task RunWithCancellationAsync(MacroProfile profile)
@@ -877,7 +908,7 @@ public sealed partial class MainForm : Form
                     if (Environment.TickCount64 >= releaseDeadline) throw new InvalidOperationException("请先松开 Ctrl / Alt / Shift / Win，再运行方案");
                     await Task.Delay(10, cts.Token);
                 }
-                await _executor.RunAsync(current, cts.Token, message => PostToUi(() => Log(message)));
+                await _executor.RunAsync(current, cts.Token, message => PostToUi(() => Log(message, technical: true)));
                 completed = true;
                 PostToUi(() =>
                 {
@@ -951,6 +982,8 @@ public sealed partial class MainForm : Form
 
     private void CancelExecution()
     {
+        _stopRequested = true;
+        _switchRequests.Clear();
         _executionCts?.Cancel();
         _executor.Cancel();
     }
@@ -995,10 +1028,10 @@ public sealed partial class MainForm : Form
         _statusLabel.Text = message;
     }
 
-    private void Log(string message)
+    private void Log(string message, bool technical = false)
     {
         var timestamp = DateTime.Now.ToString("HH:mm:ss");
-        _logList.Items.Insert(0, $"[{timestamp}] {message}");
+        if (!technical) _logList.Items.Insert(0, $"[{timestamp}] {message}");
         while (_logList.Items.Count > 200)
             _logList.Items.RemoveAt(_logList.Items.Count - 1);
         if (!_preview) ActivityLog.Append(Path.Combine(Path.GetDirectoryName(_store.FilePath)!, "activity.log"), message);

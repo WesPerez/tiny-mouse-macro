@@ -14,7 +14,7 @@ internal static class WindowActivation
     // Focus requests and pointer movement may be retried; user actions are never replayed.
     internal static async Task EnsureForegroundAsync(nint source, nint target, Func<nint> foreground,
         Func<bool> activate, Func<bool> targetUnchanged, Func<int, CancellationToken, Task> delay,
-        CancellationToken ct, Action<string>? log = null)
+        CancellationToken ct, Action<string>? log = null, bool allowClickActivation = false)
     {
         for (var attempt = 1; attempt <= 6; attempt++)
         {
@@ -39,6 +39,11 @@ internal static class WindowActivation
                 }
             }
             log?.Invoke($"焦点交接 {attempt}/6 · 请求返回 {accepted} · 当前 0x{foreground():X} · 目标 0x{target:X}");
+            if (allowClickActivation && current == source)
+            {
+                log?.Invoke("置前请求未获准，改由方案本身的一次点击激活目标；先验证位置。");
+                return;
+            }
         }
         throw new InvalidOperationException("快捷键已收到，但 Windows 未将焦点交给目标窗口；已停止后续操作。");
     }

@@ -141,11 +141,11 @@ internal static class Theme
         }
         else if (lb.Items[e.Index] is MacroStep step)
         {
-            var timing = step.RecordedDelayMs is int ms ? $"  ·  间隔 {ms / 1000.0:0.###} 秒" : "";
             TextRenderer.DrawText(e.Graphics, $"{e.Index + 1:00}   {step.Display}", BodyFont,
-                new Rectangle(textRect.X, textRect.Y + 3, textRect.Width, 24), color, flags);
-            TextRenderer.DrawText(e.Graphics, $"{(step.RecordedDelayMs.HasValue ? "录制时序" : "手动动作")}{timing}", SmallFont,
-                new Rectangle(textRect.X + 30, textRect.Y + 25, textRect.Width - 30, 18), CurrentTextSecondary, flags);
+                new Rectangle(textRect.X, textRect.Y + (step.RecordedDelayMs.HasValue ? 3 : 12), textRect.Width, 24), color, flags);
+            if (step.RecordedDelayMs is int ms)
+                TextRenderer.DrawText(e.Graphics, $"等待 {ms / 1000.0:0.###} 秒后执行", SmallFont,
+                    new Rectangle(textRect.X + 30, textRect.Y + 25, textRect.Width - 30, 18), CurrentTextSecondary, flags);
         }
         else TextRenderer.DrawText(e.Graphics, text, BodyFont, textRect, color, flags | TextFormatFlags.VerticalCenter);
     }

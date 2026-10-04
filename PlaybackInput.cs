@@ -9,6 +9,7 @@ internal interface IPlaybackInput
     void Key(int key, bool down);
     void Character(char character);
     void Mouse(uint flags, uint data = 0);
+    void MouseAt(Point point, uint flags);
 }
 
 internal static class PhysicalModifiers
@@ -23,6 +24,32 @@ internal static class PhysicalModifiers
 
 internal sealed class WindowsPlaybackInput : IPlaybackInput
 {
+    // SetCursorPos changes the cursor, but does not provide the absolute motion packet
+    // consumed by captured/raw-input applications. Keep movement and buttons in SendInput.
+    internal static NativeMethods.Input AbsoluteMovePacket(Point point, Rectangle bounds)
+    {
+        if (bounds.Width <= 0 || bounds.Height <= 0 || !bounds.Contains(point))
+            throw new InvalidOperationException("目标位置不在当前显示器上，请重新取点。");
+        static int Normalize(int value, int origin, int length) =>
+            (int)Math.Clamp(((long)value - origin) * 65536 / length + 32768L / length, 0, 65535);
+        return new() { Type = 0, U = new() { Mi = new()
+        {
+            Dx = Normalize(point.X, bounds.Left, bounds.Width), Dy = Normalize(point.Y, bounds.Top, bounds.Height),
+            Flags = 0x8000 | 0x4000 | 0x2000 | 0x0001, // ABSOLUTE | VIRTUALDESK | MOVE_NOCOALESCE | MOVE
+            ExtraInfo = (nuint)NativeMethods.MacroInputTag
+        } } };
+    }
+    internal static bool MovePointer(Point point)
+    {
+        Send([AbsoluteMovePacket(point, SystemInformation.VirtualScreen)]);
+        return true;
+    }
+    public void MouseAt(Point point, uint flags)
+    {
+        var packet = AbsoluteMovePacket(point, SystemInformation.VirtualScreen);
+        packet.U.Mi.Flags |= flags;
+        Send([packet]);
+    }
     private readonly Dictionary<int, NativeMethods.Input> _held = [];
     public uint Modifiers => PhysicalModifiers.Read();
     public void Key(int key, bool down)

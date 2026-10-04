@@ -48,6 +48,7 @@ public sealed partial class MainForm
         {
             _saveTimer.Dispose(); _recordUiTimer.Dispose(); _scheduleTimer.Dispose(); _positionTimer.Dispose();
             _tips.Dispose(); _trayIcon.ContextMenuStrip?.Dispose(); _trayIcon.Dispose();
+            _optionsPanel.Dispose(); _diagnosticsPanel.Dispose();
             _hotkeys?.Dispose(); _recorder?.Dispose();
             _externalTrigger?.Dispose();
             _profilesSource.Dispose(); _stepsSource.Dispose();

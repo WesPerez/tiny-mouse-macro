@@ -191,13 +191,13 @@ public sealed class MacroExecutor
                 await ClickAsync(step.X, step.Y, NativeMethods.MouseEventFRightDown, NativeMethods.MouseEventFRightUp, speedMultiplier, session, ct);
                 break;
             case MacroStepType.DoubleClick:
-                await ClickAsync(step.X, step.Y, NativeMethods.MouseEventFLeftDown, NativeMethods.MouseEventFLeftUp, speedMultiplier, session, ct);
+                await ClickAsync(step.X, step.Y, NativeMethods.MouseEventFLeftDown, NativeMethods.MouseEventFLeftUp, speedMultiplier, session, ct, settleAfter: false);
                 await DelayMs(50, speedMultiplier, ct);
                 // No second placement/focus activation between the two intentional clicks.
                 session.VerifyPoint(new(step.X, step.Y));
                 EnsureModifiersReleased();
-                await ClickAtCursorAsync(NativeMethods.MouseEventFLeftDown, NativeMethods.MouseEventFLeftUp, speedMultiplier, ct);
-                session.ObserveActionResult();
+                await ClickAtCursorAsync(new(step.X, step.Y), NativeMethods.MouseEventFLeftDown, NativeMethods.MouseEventFLeftUp, speedMultiplier, ct);
+                await session.CompleteClickAsync(new(step.X, step.Y), ct);
                 break;
             case MacroStepType.MiddleClick:
                 await ClickAsync(step.X, step.Y, NativeMethods.MouseEventFMiddleDown, NativeMethods.MouseEventFMiddleUp, speedMultiplier, session, ct);
@@ -233,7 +233,7 @@ public sealed class MacroExecutor
                 await session.PlaceAsync(new(step.X, step.Y), true, ct);
                 EnsureModifiersReleased();
                 session.VerifyPoint(new(step.X, step.Y));
-                _input.Mouse(NativeMethods.MouseEventFLeftDown);
+                _input.MouseAt(new(step.X, step.Y), NativeMethods.MouseEventFLeftDown);
                 try
                 {
                     await DelayMs(35, speedMultiplier, ct);
@@ -263,19 +263,19 @@ public sealed class MacroExecutor
         ChainMacroRequested?.Invoke(chainMacroId);
     }
 
-    private async Task ClickAsync(int x, int y, uint downFlag, uint upFlag, double speedMultiplier, PlaybackSession session, CancellationToken ct)
+    private async Task ClickAsync(int x, int y, uint downFlag, uint upFlag, double speedMultiplier, PlaybackSession session, CancellationToken ct, bool settleAfter = true)
     {
-        await session.PlaceAsync(new(x, y), true, ct);
+        await session.PlaceAsync(new(x, y), true, ct, allowClickActivation: true);
         EnsureModifiersReleased();
         session.VerifyPoint(new(x, y));
-        await ClickAtCursorAsync(downFlag, upFlag, speedMultiplier, ct);
-        session.ObserveActionResult();
+        await ClickAtCursorAsync(new(x, y), downFlag, upFlag, speedMultiplier, ct);
+        await session.CompleteClickAsync(new(x, y), ct, settleAfter);
     }
 
-    private async Task ClickAtCursorAsync(uint downFlag, uint upFlag, double speedMultiplier, CancellationToken ct)
+    private async Task ClickAtCursorAsync(Point point, uint downFlag, uint upFlag, double speedMultiplier, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        _input.Mouse(downFlag);
+        _input.MouseAt(point, downFlag);
         try { await DelayMs(35, speedMultiplier, ct); }
         finally { _input.Mouse(upFlag); }
     }

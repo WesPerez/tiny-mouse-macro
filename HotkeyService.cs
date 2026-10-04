@@ -11,6 +11,7 @@ public sealed class HotkeyService : IDisposable
     private readonly InputThread _thread = new("TinyMouseMacro hotkeys");
     private readonly Dictionary<int, Binding> _registered = [];
     private readonly Dictionary<KeyChord, Binding> _keyboard = [];
+    private readonly HashSet<KeyChord> _systemChords = [];
     private readonly Dictionary<int, Binding> _mouse = [];
     private readonly HashSet<int> _swallowed = [];
     private readonly KeyEventState _hookState = new(), _rawState = new();
@@ -47,6 +48,7 @@ public sealed class HotkeyService : IDisposable
                     else if (!NativeMethods.RegisterHotKey(_thread.Handle, id, binding.Chord.Modifiers | NativeMethods.ModNoRepeat, (uint)binding.Chord.Key))
                     {
                         _registered.Remove(id);
+                        _systemChords.Remove(binding.Chord);
                         if (!binding.Id.StartsWith('$')) _keyboard.Remove(binding.Chord);
                         _registrationErrors.Add($"{binding.Name}：恢复快捷键失败，请重新连接监听");
                     }
@@ -86,6 +88,7 @@ public sealed class HotkeyService : IDisposable
         _thread.Invoke(() =>
         {
             ClearCore();
+            _systemChords.Clear();
             var nextId = 100;
             Register(new("$stop", "停止", new((int)Keys.F10, 3)), true);
             Register(new("$pause", "暂停", new((int)Keys.P, 3)), true);
@@ -146,7 +149,7 @@ public sealed class HotkeyService : IDisposable
                         else
                         { errors.Add($"{b.Name}：{b.Chord} 注册失败（{reason}），请换一个按键"); return; }
                     }
-                    else _registered[id] = b;
+                    else { _registered[id] = b; _systemChords.Add(b.Chord); }
                 }
                 _keyboard[b.Chord] = b;
             }
@@ -170,7 +173,14 @@ public sealed class HotkeyService : IDisposable
                 if (!down && _swallowed.Remove(key)) return 1;
                 if (down && _swallowed.Contains(key)) return 1;
                 if (down && fresh && _keyboard.TryGetValue(new(key, _hookState.Modifiers), out var b) && CanDispatch(b))
-                { Dispatch(b, "键盘监听", kb.Time); _swallowed.Add(key); return 1; }
+                {
+                    // Let registered chords reach WM_HOTKEY outside a captured console.
+                    // Swallowing every key here prevented the OS hotkey route entirely.
+                    // The raw-input path remains the fallback; VMware needs the hook first.
+                    if (_systemChords.Contains(b.Chord) && !_vmwareForeground)
+                        return NativeMethods.CallNextHookEx(_keyboardHook, code, message, data);
+                    Dispatch(b, "键盘监听", kb.Time); _swallowed.Add(key); return 1;
+                }
                 if (down && fresh) ReportUnmatchedKey(key, _hookState.Modifiers, "键盘监听");
             }
         }
@@ -333,7 +343,7 @@ public sealed class HotkeyService : IDisposable
         _vmwareRecoveryTimer.Stop(); _vmwareReconnect.ObserveForeground(0);
         _lastForeground = 0; _vmwareForeground = false;
         foreach (var id in _registered.Keys) NativeMethods.UnregisterHotKey(_thread.Handle, id);
-        _registered.Clear(); _keyboard.Clear(); _mouse.Clear();
+        _registered.Clear(); _systemChords.Clear(); _keyboard.Clear(); _mouse.Clear();
         if (_keyboardHook != 0) NativeMethods.UnhookWindowsHookEx(_keyboardHook);
         if (_mouseHook != 0) NativeMethods.UnhookWindowsHookEx(_mouseHook);
         _keyboardHook = _mouseHook = 0;
