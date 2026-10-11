@@ -23,12 +23,10 @@ $runKey = Get-ItemProperty -LiteralPath $runKeyPath -ErrorAction SilentlyContinu
 $entry = if ($runKey) { $runKey.PSObject.Properties['TinyMouseMacro'] } else { $null }
 $previousStartup = if ($entry) { [string]$entry.Value } else { $null }
 if ([string]::IsNullOrWhiteSpace($previousStartup)) { $previousStartup = $null }
-$startupArguments = ''
 if ($null -ne $previousStartup) {
     $command = [Environment]::ExpandEnvironmentVariables($previousStartup).Trim()
-    if ($command -match '^"([^"]+\\TinyMouseMacro\.exe)"(\s+.*)?$') {
+    if ($command -match '^"([^"]+\\TinyMouseMacro\.exe)"$') {
         $startupExe = $Matches[1]
-        if ($Matches.ContainsKey(2)) { $startupArguments = $Matches[2] }
     }
     elseif ($command -match '^([^"\r\n]+\\TinyMouseMacro\.exe)$') { $startupExe = $Matches[1] }
     else { throw 'Unrecognized startup entry; no files or settings were changed.' }
@@ -109,6 +107,10 @@ try {
     }
     $checks = @(Get-Content (Join-Path $verification 'results.txt'))
     Write-Output ("Offline checks: {0} PASS" -f @($checks | Where-Object { $_ -like 'PASS *' }).Count)
+    if (Test-Path -LiteralPath $TargetExe) {
+        dotnet $testAssembly --check-startup $TargetExe
+        if ($LASTEXITCODE -ne 0) { throw 'Startup preflight failed; installed files and running instances were not changed.' }
+    }
     dotnet publish TinyMouseMacro.csproj -c Release -r win-x64 --self-contained true --artifacts-path $buildArtifacts -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o $appPublish
     if ($LASTEXITCODE -ne 0) { throw 'App publish failed; installed files were not changed.' }
     dotnet publish launcher/SwitchLauncher.csproj -c Release -r win-x64 --self-contained true --artifacts-path $buildArtifacts -p:PublishSingleFile=true -p:PublishTrimmed=true -p:IncludeNativeLibrariesForSelfExtract=true -o $launcherPublish
@@ -143,7 +145,6 @@ try {
     )
     # Keep recovery data if execution is interrupted during replacement.
     $keepRecovery = $true
-    $startupUpdated = $false
     try {
         foreach ($file in $files) {
             $backup = $null
@@ -159,23 +160,15 @@ try {
         if ($installedShortcut.TargetPath -ine $TargetExe -or $installedShortcut.WorkingDirectory -ine $targetDirectory) {
             throw 'Desktop shortcut verification failed.'
         }
-        # Preserve whether the user enabled startup. Never enable it merely by building.
-        if ($null -ne $previousStartup) {
-            $startupValue = '"' + $TargetExe + '"' + $startupArguments
-            $startupUpdated = $true
-            Set-ItemProperty -LiteralPath $runKeyPath -Name TinyMouseMacro -Value $startupValue
-            if ((Get-ItemPropertyValue -LiteralPath $runKeyPath -Name TinyMouseMacro) -cne $startupValue) {
-                throw 'Startup path verification failed.'
-            }
-        }
+        # The app requires elevation: migrate enabled Run entries to a verified
+        # current-user logon task. Disabled/absent startup stays disabled.
+        # This is the final transactional step; it restores startup on failure.
+        dotnet $testAssembly --repair-startup $TargetExe
+        if ($LASTEXITCODE -ne 0) { throw 'Startup repair failed; restoring installed files.' }
     }
     catch {
         $deploymentError = $_
         $rollbackFailed = $false
-        if ($startupUpdated) {
-            try { Set-ItemProperty -LiteralPath $runKeyPath -Name TinyMouseMacro -Value $previousStartup }
-            catch { $rollbackFailed = $true; Write-Warning 'Startup rollback failed; recovery files retained.' }
-        }
         for ($index = $replaced.Count - 1; $index -ge 0; $index--) {
             $file = $replaced[$index]
             try {
@@ -190,7 +183,7 @@ try {
     $keepRecovery = $false
     Write-Output "Deployed and verified: $TargetExe"
     Write-Output "Desktop shortcut verified: $shortcutPath"
-    Write-Output 'Startup enabled/disabled state preserved; enabled startup points to publish. User data preserved. Application not restarted.'
+    Write-Output 'Startup state preserved; enabled startup uses a verified elevated logon task pointing to publish. User data preserved. Application not restarted.'
     # Only these three legacy delivery files are owned by this migration. Leave GUID
     # launchers, user exports and all other desktop files alone; retain recoverability.
     foreach ($legacy in $legacyFiles) {

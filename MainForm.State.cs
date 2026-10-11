@@ -47,6 +47,8 @@ public sealed partial class MainForm
     {
         if (disposing)
         {
+            SaveWindowPlacement();
+            _windowPlacementTimer.Dispose();
             _uiDisposed = true;
             _saveTimer.Dispose(); _recordUiTimer.Dispose(); _scheduleTimer.Dispose(); _positionTimer.Dispose(); _activityTimer.Dispose();
             _tips.Dispose(); _trayIcon.ContextMenuStrip?.Dispose(); _trayIcon.Dispose();

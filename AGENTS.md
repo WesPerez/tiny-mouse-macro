@@ -8,7 +8,7 @@
 - 用户最新约束：安装固定为项目内 `publish\`，本机为 `E:\Project\Common\tiny-mouse-macro\publish\TinyMouseMacro.exe`；桌面只保留 `TinyMouseMacro.lnk`。此规则取代之前把 exe 放桌面的约定。
 - 统一运行 `./build-release.ps1`。主程序、配套 `TinyMouseMacro.Switch.exe` 和 `TinyMouseMacro.README.md` 都放进项目 `publish\`；快捷方式目标、工作目录及图标指向这里。不得从自启项反推新的发布位置。
 - 创建或更新快捷方式后向 Windows Shell 发送图标／目录变更通知，不重启 Explorer、不抢前台、不重排桌面。验收需区分磁盘文件存在、Shell 图标项存在及用户可见结果，不以文件存在宣称用户一定看到了图标。只有用户明确要求时才调整本应用图标位置。
-- 开机自启保留用户的开关状态：已启用时更新 HKCU Run 的 `TinyMouseMacro` 为项目 publish 路径，未启用时不自动开启。更新前核实自启项属于本项目旧桌面路径或当前 publish 路径。
+- 开机自启保留用户的开关状态：主程序需要管理员权限，已启用时使用当前用户登录触发、最高权限的 `TinyMouseMacro-<用户 SID>` 计划任务，目标为项目 publish 路径、参数 `--autostart`，不限制运行时长或电池运行。迁移前核实旧 Run 项和任务属于本项目旧桌面路径或当前 publish 路径，任务回读核验成功后才删除旧 Run 项。未启用或被系统禁用时不自动开启；迁移失败恢复原状态。
 - 首次迁移在发布及启动入口校验成功后，将桌面上确属本项目的旧 `TinyMouseMacro.exe`、`TinyMouseMacro.Switch.exe` 和 `TinyMouseMacro.README.md` 移入回收站；不清理其他应用、通用 README 或用户生成的方案启动器。
 - 不用 `publish_new` 等平行目录交付。临时编译和自测使用本次专属临时目录，结束时回收；`publish/` 已被 Git 忽略。
 

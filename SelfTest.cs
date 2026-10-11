@@ -18,6 +18,7 @@ internal static class SelfTest
             Check("hotkey parser", HotkeyParser.TryParse("Ctrl+Shift+F13", out var mods, out var key, out _) && mods == 6 && key == (uint)Keys.F13);
             const string startupPath = @"C:\Program Files\TinyMouseMacro\TinyMouseMacro.exe";
             Check("startup command contains the quoted executable path", AutoStart.BuildCommand(startupPath) == "\"C:\\Program Files\\TinyMouseMacro\\TinyMouseMacro.exe\"");
+            StartupAndWindowSelfTest.Run(output, Check);
             Check("negative coordinates and old enum values", (int)MacroStepType.LeftClick == 1 && (int)MacroStepType.ChainMacro == 19);
             var old = JsonSerializer.Deserialize<MacroProfile>("{\"Name\":\"上\",\"Hotkey\":\"Shift+Z\",\"Steps\":[{\"Type\":1,\"X\":2272,\"Y\":-457}]}")!;
             MacroStore.NormalizeProfile(old);
@@ -216,7 +217,7 @@ internal static class SelfTest
             };
             foreach (var size in new[] { new Size(1200, 860), new Size(1080, 700) })
             {
-                using var form = new MainForm(preview: true);
+                using var form = new MainForm(preview: true, previewDataDirectory: output);
                 form.InitializePreview(fixture, size);
                 for (var tab = 0; tab < 3; tab++)
                 {

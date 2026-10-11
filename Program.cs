@@ -19,15 +19,25 @@ static class Program
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TinyMouseMacro", "verification"));
         }
 
+        if (args.Length == 2 && args[0] is "--repair-startup" or "--check-startup")
+        {
+            string? error;
+            var success = args[0] == "--check-startup" ? AutoStart.CheckEnabled(args[1], out error) : AutoStart.RepairEnabled(args[1], out error);
+            if (success) return 0;
+            Console.Error.WriteLine(error);
+            return 1;
+        }
+
+        var autoStarted = args.Contains(AutoStart.StartupArgument, StringComparer.OrdinalIgnoreCase);
         using var mutex = new Mutex(true, MutexName, out var createdNew);
         if (!createdNew)
         {
-            ActivateExistingInstance();
+            if (!autoStarted) ActivateExistingInstance();
             return 0;
         }
 
         ApplicationConfiguration.Initialize();
-        Application.Run(new MainForm());
+        Application.Run(new MainForm(startInTray: autoStarted));
         return 0;
     }
 

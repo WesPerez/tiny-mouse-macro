@@ -51,9 +51,10 @@ public sealed partial class MainForm : Form
     private readonly NotifyIcon _trayIcon;
     private bool _reallyClosing;
 
-    public MainForm(bool preview = false)
+    public MainForm(bool preview = false, bool startInTray = false, string? previewDataDirectory = null)
     {
         _preview = preview;
+        _startInTray = startInTray;
         AutoScaleDimensions = new SizeF(96, 96);
         AutoScaleMode = AutoScaleMode.Dpi;
         Text = UiText.AppTitle;
@@ -64,9 +65,16 @@ public sealed partial class MainForm : Form
         KeyPreview = true;
         Theme.ApplyToForm(this);
 
-        var appDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "TinyMouseMacro");
+        var appDataDir = preview
+            ? previewDataDirectory ?? throw new ArgumentNullException(nameof(previewDataDirectory))
+            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "TinyMouseMacro");
         Directory.CreateDirectory(appDataDir);
         _store = new MacroStore(Path.Combine(appDataDir, "macros.json"));
+        _windowPlacementStore = new WindowPlacementStore(Path.Combine(appDataDir, "window-state.json"));
+        _windowPlacementTimer.Tick += (_, _) => SaveWindowPlacement();
+        LocationChanged += QueueWindowPlacementSave;
+        SizeChanged += QueueWindowPlacementSave;
+        ResizeEnd += (_, _) => SaveWindowPlacement();
         _positionTimer.Tick += (_, _) => UpdateLivePosition();
         _scheduleTimer.Tick += ScheduleTimer_Tick;
 
@@ -74,14 +82,17 @@ public sealed partial class MainForm : Form
         showItem.Click += (_, _) => ShowFromTray();
 
         var autoStartItem = new ToolStripMenuItem(UiText.TrayAutoStart);
-        autoStartItem.Checked = AutoStart.IsEnabled();
+        string? startupError = null;
+        if (!preview) AutoStart.RepairEnabled(Environment.ProcessPath!, out startupError);
+        autoStartItem.Checked = !preview && AutoStart.IsEnabled();
         autoStartItem.Click += (_, _) =>
         {
             var enable = !autoStartItem.Checked;
-            if (AutoStart.SetEnabled(enable))
+            if (AutoStart.SetEnabled(enable, out var error))
             {
-                autoStartItem.Checked = enable;
+                autoStartItem.Checked = AutoStart.IsEnabled();
             }
+            else SetStatus("开机自启设置失败：" + error);
         };
 
         var exitItem = new ToolStripMenuItem(UiText.TrayExit);
@@ -98,6 +109,7 @@ public sealed partial class MainForm : Form
         _trayIcon.ContextMenuStrip.Items.Add(autoStartItem);
         _trayIcon.ContextMenuStrip.Items.Add(new ToolStripSeparator());
         _trayIcon.ContextMenuStrip.Items.Add(exitItem);
+        _trayIcon.ContextMenuStrip.Opening += (_, _) => { if (!preview) autoStartItem.Checked = AutoStart.IsEnabled(); };
         _trayIcon.MouseDoubleClick += (_, _) => ShowFromTray();
 
         _cancelButton = new SoftButton
@@ -157,6 +169,27 @@ public sealed partial class MainForm : Form
         AutoScaleDimensions = new SizeF(96, 96);
         PerformAutoScale();
         RefreshActivityDisplay();
+        if (startupError is not null) SetStatus("开机自启修复失败：" + startupError);
+    }
+
+    private readonly bool _startInTray;
+    private bool _startupVisibilityApplied;
+    protected override void SetVisibleCore(bool value)
+    {
+        if (value && !_startupVisibilityApplied)
+        {
+            _startupVisibilityApplied = true;
+            if (_startInTray)
+            {
+                // Initialize the real application without showing/activating its window.
+                if (!IsHandleCreated) CreateHandle();
+                OnLoad(EventArgs.Empty);
+                _positionTimer.Stop();
+                base.SetVisibleCore(false);
+                return;
+            }
+        }
+        base.SetVisibleCore(value);
     }
 
     private void MainForm_KeyDown(object? sender, KeyEventArgs e)
@@ -178,6 +211,9 @@ public sealed partial class MainForm : Form
     protected override void WndProc(ref Message m)
     {
         const int wmShowWindow = NativeMethods.WmUser + 1;
+
+        // Session shutdown can happen while hidden in the tray and before a timer fires.
+        if (m.Msg is 0x0011 or 0x0016) SaveWindowPlacement();
 
         if (m.Msg == wmShowWindow)
         {
@@ -204,8 +240,11 @@ public sealed partial class MainForm : Form
         base.WndProc(ref m);
     }
 
+    private bool _mainFormLoaded;
     private void MainForm_Load(object? sender, EventArgs e)
     {
+        if (_mainFormLoaded) return;
+        _mainFormLoaded = true;
         _profiles = _store.Load();
         _profilesSource.DataSource = _profiles;
         _profileList.DataSource = _profilesSource;
@@ -216,10 +255,12 @@ public sealed partial class MainForm : Form
         RebuildHotkeys();
         if (!_preview) { _positionTimer.Start(); _scheduleTimer.Start(); }
         _saveState.Text = "更改自动保存";
+        InitializeWindowPlacement();
     }
 
     private void MainForm_FormClosing(object? sender, FormClosingEventArgs e)
     {
+        SaveWindowPlacement();
         if (!_reallyClosing && e.CloseReason == CloseReason.UserClosing && !_preview)
         {
             _diagnosticCheck.Checked = false;
@@ -266,7 +307,8 @@ public sealed partial class MainForm : Form
     {
         Show();
         if (!_preview) _positionTimer.Start();
-        WindowState = FormWindowState.Normal;
+        if (WindowState == FormWindowState.Minimized)
+            WindowState = _windowWasMaximized ? FormWindowState.Maximized : FormWindowState.Normal;
         BringToFront();
         Activate();
     }
